@@ -109,7 +109,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: '@t0.1/task_time'
+  m_text: ^t@trial/elapsed_time
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
   m_sharedMaterial: {fileID: 2180264, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
@@ -190,7 +190,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5eb95762e2601d24e96f88db2ced5a39, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  textFormatString: '@t0.1/task_time'
+  textFormatString: ^t@trial/elapsed_time
+  refreshRate: 0.1
 --- !u!1 &1577962190874943850
 GameObject:
   m_ObjectHideFlags: 0
@@ -379,7 +380,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: 'Current dirrective: ^goal/hint'
+  m_text: 'Current dirrective: ^s@trial/current_hint'
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
   m_sharedMaterial: {fileID: 2180264, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
@@ -460,7 +461,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5eb95762e2601d24e96f88db2ced5a39, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  textFormatString: 'Current dirrective: ^goal/hint'
+  textFormatString: 'Current dirrective: ^s@trial/current_hint'
+  refreshRate: 0.1
 --- !u!1 &2376413697235256148
 GameObject:
   m_ObjectHideFlags: 0
@@ -748,7 +750,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: 'Progress: ^goal/progress'
+  m_text: 'Progress: ^s@trial/progress_description'
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
   m_sharedMaterial: {fileID: 2180264, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
@@ -829,7 +831,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5eb95762e2601d24e96f88db2ced5a39, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  textFormatString: 'Progress: ^goal/progress'
+  textFormatString: 'Progress: ^s@trial/progress_description'
+  refreshRate: 0.1
 --- !u!1 &6287253735072360466
 GameObject:
   m_ObjectHideFlags: 0
@@ -971,7 +974,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: Distance to next goal @n0.1/distance_to_goal/0.# m
+  m_text: Distance to next goal ^n@trial/distance_to_goal@0.# m
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
   m_sharedMaterial: {fileID: 2180264, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
@@ -1052,7 +1055,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5eb95762e2601d24e96f88db2ced5a39, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  textFormatString: Distance to next goal @n0.1/distance_to_goal/0.# m
+  textFormatString: Distance to next goal ^n@trial/distance_to_goal@0.# m
+  refreshRate: 0.1
 --- !u!1001 &2408842426803420587
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -1248,6 +1252,10 @@ PrefabInstance:
       value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
+      propertyPath: topicName
+      value: robot/angular_velocity
+      objectReference: {fileID: 0}
+    - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
       propertyPath: valueName
       value: robot/angular_velocity
       objectReference: {fileID: 0}
@@ -1366,8 +1374,28 @@ PrefabInstance:
       value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
+      propertyPath: topicMax
+      value: 1.5
+      objectReference: {fileID: 0}
+    - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
+      propertyPath: topicMin
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
+      propertyPath: topicName
+      value: robot/linear_velocity
+      objectReference: {fileID: 0}
+    - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
       propertyPath: valueName
       value: robot/linear_velocity
+      objectReference: {fileID: 0}
+    - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
+      propertyPath: rotationMax
+      value: -270
+      objectReference: {fileID: 0}
+    - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
+      propertyPath: rotationMin
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 3656486624948862893, guid: bbc109f84bde57e4dac47b6259ebf0bc, type: 3}
       propertyPath: flipRotation

@@ -1,17 +1,24 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using RosMessageTypes.Std;
+using Unity.Robotics.ROSTCPConnector;
 using UnityEngine;
 
 public class SenquentialGoalTrial : Trial
 {
     public int currentGoalIndex = -1;
 
-    public void Start()
+    public new void Start()
     {
+        base.Start();
+        ros.RegisterPublisher<Float64Msg>("trial/distance_to_goal");
+        ros.RegisterPublisher<Int32Msg>("trial/goal_index", latch:true);
+        ros.RegisterPublisher<StringMsg>("trial/progress_description", latch:true);
+        ros.RegisterPublisher<StringMsg>("trial/current_hint", latch:true);
         OnGoalCompleted();
         StartTrial();
-        AddLiveNumber(new LiveNumber("distance_to_goal", 0));
+        
     }
 
     public void OnGoalCompleted()
@@ -21,8 +28,8 @@ public class SenquentialGoalTrial : Trial
         currentGoalIndex++;
         if (currentGoalIndex >= goals.Length)
         {
-            base.Publish("goal", ""+(currentGoalIndex), 1);
-            base.Publish("goal/progress", (currentGoalIndex) + "/" +goals.Length, 0);
+            ros.Publish("trial/goal_index", new Int32Msg(currentGoalIndex));
+            ros.Publish("trial/progress_description", new StringMsg((currentGoalIndex) + "/" +goals.Length));
             StopTrial();
         }
         else
@@ -35,11 +42,11 @@ public class SenquentialGoalTrial : Trial
             }
             nextGoal.onComplete += OnGoalCompleted;
             nextGoal.Activate();
-            base.Publish("goal/hint", nextGoal.contextMessage, 0);
-            base.Publish("goal/progress", (currentGoalIndex) + "/" +goals.Length, 0);
+            ros.Publish("trial/current_hint", new StringMsg(nextGoal.contextMessage));
+            ros.Publish("trial/progress_description", new StringMsg((currentGoalIndex) + "/" +goals.Length));
             if (currentGoalIndex > 0)
             {
-                base.Publish("goal", ""+(currentGoalIndex), 0);
+                ros.Publish("trial/goal_index", new Int32Msg(currentGoalIndex));
                 
             }
         }
@@ -54,12 +61,11 @@ public class SenquentialGoalTrial : Trial
         GameObject goal =
             environment.getObjectListByKey("goals")[currentGoalIndex];
         double distance = Vector3.Distance(robot.transform.position, goal.transform.position);
-            LiveNumber liveNumber = Array.Find(liveNumbers, number => number.name.Equals("distance_to_goal"));
-            if (liveNumber != null) liveNumber.value = distance;
-
+        ros.Publish("trial/distance_to_goal", new Float64Msg(distance));
     }
 
-    public void Update()
+    
+    public new void Update()
     {
         base.Update();
         UpdateDistanceToNextGoal();

@@ -1,16 +1,20 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using RosMessageTypes.Std;
 using TMPro;
+using Unity.Robotics.ROSTCPConnector;
 using UnityEngine;
 
 [RequireComponent(typeof(TextMeshProUGUI))]
 public class TaskAwareText : MonoBehaviour
 {
     public string textFormatString;
+    public float refreshRate = 0.1f;
     private string[] tokens;
     private TextMeshProUGUI textMeshPro;
     private bool hooked = false;
+    protected ROSConnection ros;
     
     
     // Start is called before the first frame update
@@ -18,7 +22,8 @@ public class TaskAwareText : MonoBehaviour
     {
         textMeshPro = GetComponent<TextMeshProUGUI>();
         tokens = textFormatString.Split(' ');
-        
+        ros = ROSConnection.GetOrCreateInstance();
+        StartTimer(refreshRate);
         
     }
 
@@ -33,57 +38,36 @@ public class TaskAwareText : MonoBehaviour
                     if (tokens[i][0] == '^')
                     {
                         int capturedIndex = i;
-                        Trial.TrialEvent e = TaskEnvironment.instances[TaskEnvironment.currentIndex].trial
-                            .GetLastEvent(tokens[capturedIndex].Substring(1));
-                        
-                        TaskEnvironment.instances[TaskEnvironment.currentIndex].trial.RegisterSubscriber(tokens[capturedIndex].Substring(1), @event =>
+                        string[] subTokens = tokens[i].Substring(1).Split('@');
+                        switch (subTokens[0])
                         {
-                            tokens[capturedIndex] = @event.data;
-                            Refresh();
-                        });
-                        if (e != null)
-                        {
-                            tokens[capturedIndex] = e.data;
-                            Refresh();
+                            case "s":
+                                ros.Subscribe<StringMsg>(subTokens[1], message =>
+                                {
+                                    tokens[capturedIndex] = message.data;
+                                });
+                                break;
+                            case "t":
+                                
+                                ros.Subscribe<Float64Msg>(subTokens[1], message =>
+                                {
+                                    double elapsed = message.data;
+                                    int msTotal = (int)(elapsed * 1000);
+                                    int min = msTotal / 60000;
+                                    int sec = (msTotal / 1000) % 60;
+                                    int ms = (msTotal % 1000)/100;
+                                    tokens[capturedIndex] = $"{min:D2}:{sec:D2}:{ms:D1}";
+                                });
+                                break;
+                            case "n":
+                                string format = subTokens.Length > 2 ? subTokens[2] : "0.##";
+                                ros.Subscribe<Float64Msg>(subTokens[1], message =>
+                                {
+                                    tokens[capturedIndex] = message.data.ToString(format);
+                                });
+                                break;
                         }
-                    }else if (tokens[i][0] == '@')
-                    {
-                        if (tokens[i][1] == 't')
-                        {
-                            int capturedIndex = i;
-                            string[] subTokens = tokens[capturedIndex].Substring(2).Split('/');
-                            double duration = Double.Parse(subTokens[0]);
-                            string capturedName = subTokens[1];
-                            double timerStart = 0;
-                            StartTimer(capturedIndex, timerStart, (float)duration, () =>
-                            {
-                                double elapsed = Array
-                                    .Find(TaskEnvironment.instances[TaskEnvironment.currentIndex].trial.liveNumbers,
-                                        l => l.name.Equals(capturedName)).value;
-                                int msTotal = (int)(elapsed * 1000);
-                                int min = msTotal / 60000;
-                                int sec = (msTotal / 1000) % 60;
-                                int ms = (msTotal % 1000)/100;
-                                return $"{min:D2}:{sec:D2}:{ms:D1}";
-                            });
-                        } else if (tokens[i][1] == 'n')
-                        {
-                            int capturedIndex = i;
-                            string[] subTokens = tokens[capturedIndex].Substring(2).Split('/');
-                            double duration = Double.Parse(subTokens[0]);
-                            string capturedName = subTokens[1];
-                            double timerStart = 0;
-                            string format = subTokens.Length > 2 ? subTokens[2] : "0.##";
-                            StartTimer(capturedIndex, timerStart, (float)duration, () =>
-                            {
-                                double value = Array
-                                    .Find(TaskEnvironment.instances[TaskEnvironment.currentIndex].trial.liveNumbers,
-                                        l => l.name.Equals(capturedName)).value;
-                                return value.ToString(format);
-                            });
-                            
-                            
-                        }
+
                     }
                 }
             }
@@ -112,13 +96,11 @@ public class TaskAwareText : MonoBehaviour
         if (!hooked) hooked = RegisterHooks();
     }
     
-    public void StartTimer(int tokenIndex, double startTime, float intervalSeconds, Func<string> tokenSource)
+    public void StartTimer(float intervalSeconds)
     {
         StartCoroutine(TimerCoroutine(intervalSeconds, () =>
         {
-            tokens[tokenIndex] = tokenSource();
             Refresh();
-
         }));
     }
 
