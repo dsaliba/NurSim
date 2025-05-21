@@ -56,6 +56,12 @@ public class SenquentialGoalTrial : Trial
 
     public void UpdateDistanceToNextGoal()
     {
+        if (currentGoalIndex >= environment.getObjectListByKey("goals").Length)
+        {
+            ros.Publish("trial/distance_to_goal", new Float64Msg(0));
+            return;
+        }
+        
         GameObject robot = environment.getObjectListByKey("robots")[
             0];
         GameObject goal =

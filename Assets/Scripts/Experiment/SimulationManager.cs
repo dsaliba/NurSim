@@ -1,17 +1,20 @@
 using System.Collections;
 using System.Collections.Generic;
+using RosMessageTypes.Std;
+using Unity.Robotics.ROSTCPConnector;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
 public class SimulationManager : MonoBehaviour
 {
-    [System.Serializable]
+    [System.Serializable] 
     public class NamedPrefab
     {
         public string name;
         public GameObject prefab;
     }
-    
+    [SerializeField]
+    public string unitySystemIP = "127.0.0.1";
     public string[] environmentSceneNames;
     public NamedPrefab[] interfaces;
     
@@ -20,23 +23,39 @@ public class SimulationManager : MonoBehaviour
     string activeEnvironmentName;
     string activeInterfaceName;
 
+
+    private ROSConnection ros;
     private GameObject activeInterface;
+    private bool firstUpdate = true;
     
     // Start is called before the first frame update
     void Start()
     {
+        ros = ROSConnection.GetOrCreateInstance();
+        ros.RegisterPublisher<StringMsg>("unity/ip", latch: true);
+        
         if (loadOnStart)
         {
             LoadEnvironmentScene(0);
             LoadInterfaceScene(0);
         }
-        HTTPDash.Instance.RegisterButton("Reset", () =>
+        // HTTPDash.Instance.RegisterButton("Reset", () =>
+        // {
+        //     Debug.Log("Reset button clicked from HTTP!");
+        //     ResetCurrentEnvironment();
+        //     Destroy(activeInterface);
+        //     LoadInterfaceScene(0);
+        // });
+        HTTPDash.Instance.RegisterButton("Task Reset", "Reset", s =>
         {
             Debug.Log("Reset button clicked from HTTP!");
             ResetCurrentEnvironment();
             Destroy(activeInterface);
             LoadInterfaceScene(0);
         });
+        HTTPDash.Instance.RegisterDropdown("Test Dropdown", "Press Me Too", new string[]{"Dimitri", "Nikita", "Lorena"}, s => Debug.LogWarning(s));
+        HTTPDash.Instance.RegisterInput("Test Input", "Press Me Last", "Write here", s => Debug.LogWarning(s));
+        
     }
     
     public void ResetCurrentEnvironment()
@@ -81,6 +100,10 @@ public class SimulationManager : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        
+        if (firstUpdate)
+        {
+            ros.Publish("unity/ip", new StringMsg(unitySystemIP));
+            firstUpdate = false;
+        }
     }
 }

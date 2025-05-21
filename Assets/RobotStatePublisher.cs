@@ -43,6 +43,7 @@ public class RobotStatePublisher : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
+        
         GameObject robot =
             TaskEnvironment.instances[TaskEnvironment.currentIndex].getObjectListByKey("robots")[robotIndex];
         Rigidbody body = robot.GetComponent<Rigidbody>();
