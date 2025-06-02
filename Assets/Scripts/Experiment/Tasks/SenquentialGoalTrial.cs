@@ -23,6 +23,7 @@ public class SenquentialGoalTrial : Trial
 
     public void OnGoalCompleted()
     {
+        HTTPDash.Instance.SendNotification("Goal Reached", "Robot reached goal #" + currentGoalIndex, "green");
         GameObject[] goals = base.environment.getObjectListByKey("goals");
         GoalStepping:
         currentGoalIndex++;

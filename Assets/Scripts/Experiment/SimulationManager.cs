@@ -55,8 +55,21 @@ public class SimulationManager : MonoBehaviour
         });
         HTTPDash.Instance.RegisterDropdown("Test Dropdown", "Press Me Too", new string[]{"Dimitri", "Nikita", "Lorena"}, s => Debug.LogWarning(s));
         HTTPDash.Instance.RegisterInput("Test Input", "Press Me Last", "Write here", s => Debug.LogWarning(s));
+        HTTPDash.Instance.RegisterDropdown("Medicines", "Press Me Too", new string[]{"Advil", "peroxide", "D3"}, s =>
+        {
+
+            Debug.LogWarning("Medicine selected" + s);
+        });
+        
+        HTTPDash.Instance.RegisterButton("Count", "Increment", s =>
+        {
+            Debug.LogWarning("Count " +  count++);
+            
+        });
         
     }
+    
+    private int count = 0;
     
     public void ResetCurrentEnvironment()
     {
@@ -93,6 +106,7 @@ public class SimulationManager : MonoBehaviour
                 break;
             }
         }
+        HTTPDash.Instance.SendNotification("Scene Loaded", "Loaded scene: " + activeEnvironmentName, "blue");
         SceneManager.LoadScene(activeEnvironmentName, LoadSceneMode.Additive);
     } 
     
