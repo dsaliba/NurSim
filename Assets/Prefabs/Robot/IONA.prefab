@@ -5522,6 +5522,7 @@ GameObject:
   - component: {fileID: 702946891374405995}
   - component: {fileID: 6339115905099461746}
   - component: {fileID: 6339115905099461741}
+  - component: {fileID: 1309314264575394918}
   m_Layer: 15
   m_Name: IONA
   m_TagString: Robot
@@ -5626,6 +5627,22 @@ FixedJoint:
   m_EnablePreprocessing: 1
   m_MassScale: 1
   m_ConnectedMassScale: 1
+--- !u!114 &1309314264575394918
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 702946891374405994}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7243db9379c60244c84e27a86a56385d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  exceptionList:
+  - gopher/r_wheel_link
+  - gopher/l_wheel_link
+  - gopher/chassis_link
 --- !u!1 &702946891382520544
 GameObject:
   m_ObjectHideFlags: 0
@@ -23905,7 +23922,7 @@ Camera:
     width: 1
     height: 1
   near clip plane: 0.3
-  far clip plane: 1000
+  far clip plane: 15
   field of view: 60
   orthographic: 0
   orthographic size: 5

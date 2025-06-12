@@ -17,26 +17,14 @@ public class VirtualKortexDriver : MonoBehaviour
 
     
     private ROSConnection ros;
-    private bool isTracking = false;
+
+    private bool connected = false;
+    
     // Start is called before the first frame update
     void Start()
     {
         ros = ROSConnection.GetOrCreateInstance();
-        ros.Subscribe<BoolMsg>($"/{robotName}/teleoperation/is_tracking", msg => isTracking = msg.data);
-        ros.Subscribe<JointAnglesMsg>($"/{robotName}/relaxed_ik/joint_angle_solutions", msg =>
-        {
-            if (isTracking)
-            {
-                List<float> targets = new List<float>();
-                for (int i = 0; i < msg.joint_angles.Length; i++)
-                {
-                    targets.Add(msg.joint_angles[i].value);
-                }
-                armController.SetJointAngles(targets.ToArray());
-                armController.MoveToTarget();
-            }
-            
-        });
+        
     }
     
     
@@ -44,6 +32,22 @@ public class VirtualKortexDriver : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        
+        if (Time.fixedTimeAsDouble > 10 && !connected)
+        {
+            ros.Subscribe<JointAnglesMsg>($"/{robotName}/relaxed_ik/joint_angle_solutions", msg =>
+            {
+                
+                    List<float> targets = new List<float>();
+                    for (int i = 0; i < msg.joint_angles.Length; i++)
+                    {
+                        targets.Add(msg.joint_angles[i].value);
+                    }
+                    armController.SetJointAngles(targets.ToArray());
+                    armController.MoveToTarget();
+                
+            
+            });
+            connected = true;
+        }
     }
 }
