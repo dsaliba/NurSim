@@ -11,7 +11,7 @@ GameObject:
   - component: {fileID: 6899841363411100261}
   - component: {fileID: 7950094201203718516}
   - component: {fileID: 8203731265028727534}
-  - component: {fileID: 2069814857741584090}
+  - component: {fileID: 8406736914021335538}
   m_Layer: 0
   m_Name: Single Camera
   m_TagString: Untagged
@@ -73,7 +73,7 @@ MonoBehaviour:
     y: 0
     width: 1
     height: 1
---- !u!114 &2069814857741584090
+--- !u!114 &8406736914021335538
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -82,7 +82,9 @@ MonoBehaviour:
   m_GameObject: {fileID: 8214641991451869670}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: ab39879916ed30e41bc9dd2b50f36d8d, type: 3}
+  m_Script: {fileID: 11500000, guid: 092a4b74913e23a47a0445b8fcce1f04, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   cameraName: 
+  port: -1
+  fragmentTimeout: 0.2

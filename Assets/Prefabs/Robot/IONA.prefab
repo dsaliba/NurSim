@@ -6334,7 +6334,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   cameraName: 
-  targetIP: 127.0.0.1
   fps: 1
   width: 640
   height: 480
@@ -9003,7 +9002,7 @@ GameObject:
   - component: {fileID: 9053960184233408692}
   - component: {fileID: 7501851299506640778}
   m_Layer: 15
-  m_Name: gopher/left_arm_tool_frame
+  m_Name: gopher/left_arm/tool_frame
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -10780,6 +10779,7 @@ Transform:
   - {fileID: 7628781303651052180}
   - {fileID: 7628781304563526202}
   - {fileID: 1893586171367878172}
+  - {fileID: 6868613713386932788}
   m_Father: {fileID: 702946892021830366}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1768165502904179366
@@ -16614,7 +16614,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &6212455405601276707
 Transform:
   m_ObjectHideFlags: 0
@@ -16746,7 +16746,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   cameraName: back_camera
-  targetIP: 127.0.0.1
   fps: 30
   width: 640
   height: 480
@@ -17555,6 +17554,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1087815479712610301}
   - component: {fileID: 8558703757947020726}
+  - component: {fileID: 1093276045845890126}
   m_Layer: 15
   m_Name: Chest
   m_TagString: Untagged
@@ -17602,6 +17602,20 @@ MonoBehaviour:
   emergencyStop: 0
   chestJoint: {fileID: 3416078106938707778}
   maximumSpeed: 0.1
+--- !u!114 &1093276045845890126
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4307134308423915965}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ddd5af8d30cf50f4893026b3d989ac39, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  topicName: /chest_logger/logger_info
+  chest: {fileID: 3416078106938707778}
 --- !u!1 &4350159748985643221
 GameObject:
   m_ObjectHideFlags: 0
@@ -18464,7 +18478,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &533617251880141816
 Transform:
   m_ObjectHideFlags: 0
@@ -18777,6 +18791,7 @@ GameObject:
   m_Component:
   - component: {fileID: 8450823993674403183}
   - component: {fileID: 7285019941414277457}
+  - component: {fileID: 7265224487321985008}
   m_Layer: 15
   m_Name: General
   m_TagString: Untagged
@@ -18817,6 +18832,22 @@ MonoBehaviour:
   forceLimit: 1000
   assignToAllChildren: 1
   robotChainLength: 0
+--- !u!114 &7265224487321985008
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4715216892123265490}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d1e16a4c202bc5048b36ffbbfb841653, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  baseLink: {fileID: 702946891102146246}
+  originalRobotName: gopher
+  targetRobotName: iona
+  publishRateHz: 60
 --- !u!1 &4823188892800124110
 GameObject:
   m_ObjectHideFlags: 0
@@ -22413,7 +22444,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &4997007907631399568
 Transform:
   m_ObjectHideFlags: 0
@@ -23957,11 +23988,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: ce9d4443481d78b4dbd2013629721d2a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  cameraName: front_camera
-  targetIP: 127.0.0.1
+  cameraName: active_neck
   fps: 30
-  width: 960
-  height: 540
+  width: 640
+  height: 480
   jpegQuality: 75
   targetPort: -1
 --- !u!1 &6869341501706853007
@@ -24117,7 +24147,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &6060173727337467101
 Transform:
   m_ObjectHideFlags: 0
@@ -24586,6 +24616,52 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 46398bc5d6905ad429a6d2d973afe002, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!1 &7005378784877194978
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 6868613713386932788}
+  - component: {fileID: 8927946659944919792}
+  m_Layer: 15
+  m_Name: Neck
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &6868613713386932788
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7005378784877194978}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 4751025150965887312}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &8927946659944919792
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7005378784877194978}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3b862672cf4e8344a9b466ad41ce316f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  topicName: /headsetInfo
+  neckTransform: {fileID: 702946892078896868}
 --- !u!1 &7042617553958340568
 GameObject:
   m_ObjectHideFlags: 0
@@ -25810,7 +25886,7 @@ GameObject:
   - component: {fileID: 6582898551787036974}
   - component: {fileID: 978594505429757638}
   m_Layer: 15
-  m_Name: gopher/left_arm_base_link
+  m_Name: gopher/left_arm/base_link
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -26485,6 +26561,8 @@ GameObject:
   - component: {fileID: 7939491165433940371}
   - component: {fileID: 12984549}
   - component: {fileID: 1566264857}
+  - component: {fileID: 2947017069603542074}
+  - component: {fileID: 6393267849488449102}
   m_Layer: 15
   m_Name: Left Arm
   m_TagString: Untagged
@@ -26764,6 +26842,44 @@ MonoBehaviour:
   <BaseTransform>k__BackingField: {fileID: 4663845753623217349}
   forwardKinematics: {fileID: 7354815183373339855}
   infoFileName: kortex_info.yaml
+--- !u!114 &2947017069603542074
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7628781303651052179}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5ba1fc1ea405da743ae570d770f05e98, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  robotName: left_arm
+  armController: {fileID: 12984549}
+--- !u!114 &6393267849488449102
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7628781303651052179}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8c571bf818702754880f679c67b22f97, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  jointStateTopic: /left_arm/base_feedback/joint_state
+  robotName: left_arm
+  publishRateHz: 30
+  jointArticulations:
+  - {fileID: 1022194730202406233}
+  - {fileID: 3591756552336091101}
+  - {fileID: 9213084084220862699}
+  - {fileID: 1749118801756402312}
+  - {fileID: 1046231983149799987}
+  - {fileID: 4793937014380757148}
+  - {fileID: 4033364744637331922}
+  - {fileID: 4033364744637331922}
 --- !u!1 &7628781304040955771
 GameObject:
   m_ObjectHideFlags: 0
@@ -26779,6 +26895,7 @@ GameObject:
   - component: {fileID: 1247843086211099820}
   - component: {fileID: 1304358819}
   - component: {fileID: 7053443030313734212}
+  - component: {fileID: 3784693393484905744}
   m_Layer: 15
   m_Name: Base
   m_TagString: Untagged
@@ -26808,7 +26925,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 7628781304040955771}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 3eb8db51576ab7deaa07fe706bcb174a, type: 3}
   m_Name: 
@@ -26928,12 +27045,26 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 7628781304040955771}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8278f8560f47ef64da4b85c3593532be, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   twistTopicName: cmd_vel
+--- !u!114 &3784693393484905744
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7628781304040955771}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1aa0e676800307a4ba731fffc7fc2c3a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  topicName: /base_controller/command
+  wheelController: {fileID: 476914934}
 --- !u!1 &7628781304563526201
 GameObject:
   m_ObjectHideFlags: 0
@@ -26951,6 +27082,8 @@ GameObject:
   - component: {fileID: 7628781304563526181}
   - component: {fileID: 1271706237}
   - component: {fileID: 1898150286}
+  - component: {fileID: 1783556903038877392}
+  - component: {fileID: 6656675784588602285}
   m_Layer: 15
   m_Name: Right Arm
   m_TagString: Untagged
@@ -27230,6 +27363,44 @@ MonoBehaviour:
   <BaseTransform>k__BackingField: {fileID: 8921087421494893181}
   forwardKinematics: {fileID: 5915472104543767608}
   infoFileName: kortex_info.yaml
+--- !u!114 &1783556903038877392
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7628781304563526201}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8c571bf818702754880f679c67b22f97, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  jointStateTopic: /right_arm/base_feedback/joint_state
+  robotName: right_arm
+  publishRateHz: 30
+  jointArticulations:
+  - {fileID: 7143722300298670626}
+  - {fileID: 3608357748747205016}
+  - {fileID: 8353026976992740546}
+  - {fileID: 8069837071853804557}
+  - {fileID: 1829501777592186492}
+  - {fileID: 5553209666230227735}
+  - {fileID: 5541510279306631820}
+  - {fileID: 5541510279306631820}
+--- !u!114 &6656675784588602285
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7628781304563526201}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5ba1fc1ea405da743ae570d770f05e98, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  robotName: right_arm
+  armController: {fileID: 1271706237}
 --- !u!1 &7686751598354565394
 GameObject:
   m_ObjectHideFlags: 0
@@ -29715,7 +29886,7 @@ GameObject:
   - component: {fileID: 5820118963905270675}
   - component: {fileID: 7613397698153631876}
   m_Layer: 15
-  m_Name: gopher/right_arm_tool_frame
+  m_Name: gopher/right_arm/tool_frame
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -30472,7 +30643,7 @@ GameObject:
   - component: {fileID: 8733946723690363887}
   - component: {fileID: 4024792808182079440}
   m_Layer: 15
-  m_Name: gopher/right_arm_base_link
+  m_Name: gopher/right_arm/base_link
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0

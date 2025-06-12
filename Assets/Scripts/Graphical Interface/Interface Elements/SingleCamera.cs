@@ -15,7 +15,7 @@ public class SingleCamera : MonoBehaviour
     private bool connected = false;
     
     // Start is called before the first frame update
-    void Start()
+    void Start() 
     {
         
         
