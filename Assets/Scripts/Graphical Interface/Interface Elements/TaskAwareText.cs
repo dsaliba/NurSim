@@ -51,7 +51,7 @@ public class TaskAwareText : MonoBehaviour
                 int currentIndex = indexInArray;
 
                 string funcName = match.Groups[1].Value;
-                string[] args = match.Groups[2].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                string[] args = match.Groups[2].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.RemoveEmptyEntries);
                 Debug.LogWarning($"Function: {funcName}, Index: {currentIndex}, Args: [{string.Join(", ", args)}]");
 
                 switch (funcName)

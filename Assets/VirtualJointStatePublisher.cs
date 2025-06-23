@@ -64,42 +64,46 @@ public class VirtualJointStatePublisher : MonoBehaviour
 
     void PublishJointState()
     {
-        int count = jointArticulations.Count;
-        DateTime now = DateTime.UtcNow;
-        TimeSpan sinceEpoch = now - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-        var msg = new JointStateMsg
+        if (Time.fixedTimeAsDouble > 10)
         {
-            header = new HeaderMsg
+            int count = jointArticulations.Count;
+            DateTime now = DateTime.UtcNow;
+            TimeSpan sinceEpoch = now - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var msg = new JointStateMsg
             {
-                stamp = new TimeMsg
+                header = new HeaderMsg
                 {
-                    sec = (uint)sinceEpoch.TotalSeconds,
-                    nanosec = (uint)((sinceEpoch.TotalSeconds - Math.Floor(sinceEpoch.TotalSeconds)) * 1e9)
+                    stamp = new TimeMsg
+                    {
+                        sec = (uint)sinceEpoch.TotalSeconds,
+                        nanosec = (uint)((sinceEpoch.TotalSeconds - Math.Floor(sinceEpoch.TotalSeconds)) * 1e9)
+                    },
+                    frame_id = "" // Typically empty for JointState
                 },
-                frame_id = "" // Typically empty for JointState
-            },
-            name = new string[count],
-            position = new double[count],
-            velocity = new double[count],
-            effort = new double[count]
-        };
+                name = new string[count],
+                position = new double[count],
+                velocity = new double[count],
+                effort = new double[count]
+            };
 
-        for (int i = 0; i < count; i++)
-        {
-            var joint = jointArticulations[i];
-            string jointName = $"{robotName}/joint_{i+1}";
+            for (int i = 0; i < count; i++)
+            {
+                var joint = jointArticulations[i];
+                string jointName = $"{robotName}/joint_{i+1}";
 
-            // Get joint state (position, velocity, effort)
-            float jointPosition = joint.jointPosition[0]; // assumes 1-DOF
-            float jointVelocity = joint.jointVelocity[0];
-            float jointEffort = joint.jointForce[0];
+                // Get joint state (position, velocity, effort)
+                float jointPosition = joint.jointPosition[0]; // assumes 1-DOF
+                float jointVelocity = joint.jointVelocity[0];
+                float jointEffort = joint.jointForce[0];
 
-            msg.name[i] = jointName;
-            msg.position[i] = jointPosition;
-            msg.velocity[i] = jointVelocity;
-            msg.effort[i] = jointEffort;
+                msg.name[i] = jointName;
+                msg.position[i] = jointPosition;
+                msg.velocity[i] = jointVelocity;
+                msg.effort[i] = jointEffort;
+            }
+
+            ros.Publish(jointStateTopic, msg);
         }
-
-        ros.Publish(jointStateTopic, msg);
+        
     }
 }
