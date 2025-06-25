@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Collections.Generic;
 using RosMessageTypes.ROSTCPEndpoint;
 using Unity.Robotics.ROSTCPConnector;
@@ -17,7 +17,7 @@ public class VirtualActiveNeck : MonoBehaviour
         ros = ROSConnection.GetOrCreateInstance();
         ros.Subscribe<ControllerInputMsg>(topicName, msg =>
         {
-            lastRot = new Quaternion(msg.controller_rot_x, msg.controller_rot_y, msg.controller_rot_z, msg.controller_rot_w);
+            lastRot = new Quaternion(msg.controller_rot_x, msg.controller_rot_y, 0, msg.controller_rot_w);
         });
     }
 

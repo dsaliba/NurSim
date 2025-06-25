@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
@@ -14,70 +14,82 @@ public class TaskAwareText : MonoBehaviour
     public float refreshRate = 0.1f;
 
     private TextMeshProUGUI textMeshPro;
-    private bool hooked = false;
-    protected ROSConnection ros;
-    private List<string> segments;
+    private ROSConnection ros;
+    private List<string> segments = new();
+    private Coroutine refreshCoroutine;
 
-    // Hold references to the callbacks to prevent garbage collection
     private List<Delegate> activeCallbacks = new();
+    private bool initialized = false;
 
-    void Start()
+    void Awake()
     {
         textMeshPro = GetComponent<TextMeshProUGUI>();
         ros = ROSConnection.GetOrCreateInstance();
+    }
+
+    void OnEnable()
+    {
+        if (!initialized)
+        {
+            Initialize();
+            initialized = true;
+        }
+
         StartTimer(refreshRate);
     }
 
-    private bool RegisterHooks()
+    void OnDisable()
     {
-        if (TaskEnvironment.instances.Count > TaskEnvironment.currentIndex)
+        if (refreshCoroutine != null)
         {
-            string input = textFormatString;
-            segments = new();
+            StopCoroutine(refreshCoroutine);
+            refreshCoroutine = null;
+        }
+    }
 
-            var regex = new Regex(@"\{(\w+):\s*([^}]+)\}");
-            int lastIndex = 0;
-            int indexInArray = 0;
+    private void Initialize()
+    {
+        string input = textFormatString;
+        segments.Clear();
+        activeCallbacks.Clear();
 
-            foreach (Match match in regex.Matches(input))
+        var regex = new Regex(@"\{(\w+):\s*([^}]+)\}");
+        int lastIndex = 0;
+        int indexInArray = 0;
+
+        foreach (Match match in regex.Matches(input))
+        {
+            if (match.Index > lastIndex)
             {
-                if (match.Index > lastIndex)
-                {
-                    segments.Add(input.Substring(lastIndex, match.Index - lastIndex));
-                    indexInArray++;
-                }
+                segments.Add(input.Substring(lastIndex, match.Index - lastIndex));
+                indexInArray++;
+            }
 
-                segments.Add(""); // Placeholder
-                int currentIndex = indexInArray;
+            segments.Add(""); // Placeholder
+            int currentIndex = indexInArray;
 
-                string funcName = match.Groups[1].Value;
-                string[] args = match.Groups[2].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.RemoveEmptyEntries);
-                Debug.LogWarning($"Function: {funcName}, Index: {currentIndex}, Args: [{string.Join(", ", args)}]");
+            string funcName = match.Groups[1].Value;
+            string[] args = match.Groups[2].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.RemoveEmptyEntries);
+            Debug.LogWarning($"Function: {funcName}, Index: {currentIndex}, Args: [{string.Join(", ", args)}]");
 
-                switch (funcName)
-                {
-                    case "string":
+            switch (funcName)
+            {
+                case "string":
                     {
-                        Action<StringMsg> callback = message =>
-                        {
-                            segments[currentIndex] = message.data;
-                        };
+                        Action<StringMsg> callback = message => segments[currentIndex] = message.data;
                         activeCallbacks.Add(callback);
                         ros.Subscribe<StringMsg>(args[0], callback);
                         break;
                     }
-                    case "num":
+                case "num":
                     {
                         string format = args.Length > 1 ? args[1] : "0.##";
-                        Action<Float64Msg> callback = message =>
-                        {
-                            segments[currentIndex] = message.data.ToString(format);
-                        };
+                        Action<Float64Msg> callback = message => segments[currentIndex] = message.data.ToString(format);
                         activeCallbacks.Add(callback);
                         ros.Subscribe<Float64Msg>(args[0], callback);
                         break;
                     }
-                    case "boolText":
+                case "boolText":
                     {
                         Action<BoolMsg> callback = message =>
                         {
@@ -88,7 +100,7 @@ public class TaskAwareText : MonoBehaviour
                         ros.Subscribe<BoolMsg>(args[0], callback);
                         break;
                     }
-                    case "time":
+                case "time":
                     {
                         Action<Float64Msg> callback = message =>
                         {
@@ -103,22 +115,15 @@ public class TaskAwareText : MonoBehaviour
                         ros.Subscribe<Float64Msg>(args[0], callback);
                         break;
                     }
-                }
-
-                lastIndex = match.Index + match.Length;
-                indexInArray++;
             }
 
-            if (lastIndex < input.Length)
-            {
-                segments.Add(input.Substring(lastIndex));
-            }
-
-            return true;
+            lastIndex = match.Index + match.Length;
+            indexInArray++;
         }
-        else
+
+        if (lastIndex < input.Length)
         {
-            return false;
+            segments.Add(input.Substring(lastIndex));
         }
     }
 
@@ -126,24 +131,15 @@ public class TaskAwareText : MonoBehaviour
     {
         if (segments == null) return;
 
-        string liveString = "";
-        foreach (var s in segments)
-        {
-            liveString += s;
-        }
-
-        textMeshPro.text = liveString;
-    }
-
-    void Update()
-    {
-        if (!hooked)
-            hooked = RegisterHooks();
+        textMeshPro.text = string.Concat(segments);
     }
 
     public void StartTimer(float intervalSeconds)
     {
-        StartCoroutine(TimerCoroutine(intervalSeconds, Refresh));
+        if (refreshCoroutine != null)
+            StopCoroutine(refreshCoroutine);
+
+        refreshCoroutine = StartCoroutine(TimerCoroutine(intervalSeconds, Refresh));
     }
 
     private IEnumerator TimerCoroutine(float interval, Action onTick)

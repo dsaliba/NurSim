@@ -15704,7 +15704,7 @@ ArticulationBody:
     forceLimit: 1000000
     target: 0
     targetVelocity: 0
-    driveType: 0
+    driveType: 3
   m_YDrive:
     lowerLimit: 0
     upperLimit: 0
@@ -17601,7 +17601,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 4307134308423915965}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: e7a91cf9478b1be4f9fef1c9e28527da, type: 3}
   m_Name: 
@@ -17632,6 +17632,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   topicName: /chest_logger/logger_info
+  controlTopicName: /chest_control/velocity_fraction
+  maxVelocity: 0.1
   chest: {fileID: 3416078106938707778}
 --- !u!1 &4350159748985643221
 GameObject:

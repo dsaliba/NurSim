@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using System;
 using System.Collections.Generic;
 using System.Net;
@@ -17,6 +17,7 @@ public class HTTPDash : MonoBehaviour
     private object lockObj = new object();
     private Queue<HttpListenerContext> waitingClients = new Queue<HttpListenerContext>();
     private object notifyLock = new object();
+    public string localIP = "localhost";
 
     void Awake()
     {
@@ -32,7 +33,7 @@ public class HTTPDash : MonoBehaviour
     void Start()
     {
         listener = new HttpListener();
-        listener.Prefixes.Add("http://localhost:8080/");
+        listener.Prefixes.Add($"http://{localIP}:8080/");
         listener.Start();
         running = true;
 

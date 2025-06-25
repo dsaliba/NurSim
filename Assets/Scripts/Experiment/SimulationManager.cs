@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Collections.Generic;
 using RosMessageTypes.Std;
 using Unity.Robotics.ROSTCPConnector;
@@ -27,12 +27,15 @@ public class SimulationManager : MonoBehaviour
     private ROSConnection ros;
     private GameObject activeInterface;
     private bool firstUpdate = true;
+    bool lastLatch = false;
     
     // Start is called before the first frame update
     void Start()
     {
         ros = ROSConnection.GetOrCreateInstance();
         ros.RegisterPublisher<StringMsg>("unity/ip", latch: true);
+        ros.RegisterPublisher<StringMsg>("trial/dash");
+        ros.RegisterPublisher<BoolMsg>("/haptic/eject");
         
         if (loadOnStart)
         {
@@ -53,8 +56,21 @@ public class SimulationManager : MonoBehaviour
             Destroy(activeInterface);
             LoadInterfaceScene(0);
         });
+        HTTPDash.Instance.RegisterButton("Haptics", "Eject", s =>
+        {
+            ros.Publish("/haptic/eject", new BoolMsg(true));
+        });
+        ros.Subscribe<BoolMsg>("/haptic/latched", msg =>
+        {
+            if (msg.data != lastLatch)
+            {
+                HTTPDash.Instance.SendNotification("Haptics", $"Device {(msg.data ? "latched":"unlatched")}", msg.data ? "blue" : "red");
+            }
+            lastLatch = msg.data;
+        });
         HTTPDash.Instance.RegisterDropdown("Test Dropdown", "Press Me Too", new string[]{"Dimitri", "Nikita", "Lorena"}, s => Debug.LogWarning(s));
         HTTPDash.Instance.RegisterInput("Test Input", "Press Me Last", "Write here", s => Debug.LogWarning(s));
+        HTTPDash.Instance.RegisterInput("Dash Message", "Send", "Write here", s => ros.Publish("trial/dash", new StringMsg(s)));
         HTTPDash.Instance.RegisterDropdown("Medicines", "Press Me Too", new string[]{"Advil", "peroxide", "D3"}, s =>
         {
 
