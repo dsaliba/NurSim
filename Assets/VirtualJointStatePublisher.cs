@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using RosMessageTypes.BuiltinInterfaces;
 using RosMessageTypes.Rosgraph;
@@ -6,11 +6,14 @@ using UnityEngine;
 using Unity.Robotics.ROSTCPConnector;
 using RosMessageTypes.Sensor;
 using RosMessageTypes.Std;
+using RosMessageTypes.KortexDriver;
 
 public class VirtualJointStatePublisher : MonoBehaviour
 {
     [Tooltip("ROS topic to publish JointState messages to (e.g., /joint_states)")]
     public string jointStateTopic = "/joint_states";
+
+    public string baseFeedbackTopic = "/base_feedback";
 
     public string robotName;
 
@@ -46,6 +49,7 @@ public class VirtualJointStatePublisher : MonoBehaviour
 
         ros = ROSConnection.GetOrCreateInstance();
         ros.RegisterPublisher<JointStateMsg>(jointStateTopic);
+        ros.RegisterPublisher<BaseCyclic_FeedbackMsg>(baseFeedbackTopic);
 
         publishInterval = 1f / publishRateHz;
         timeSinceLastPublish = 0f;
@@ -64,6 +68,14 @@ public class VirtualJointStatePublisher : MonoBehaviour
 
     void PublishJointState()
     {
+        BaseCyclic_FeedbackMsg basemsg = new BaseCyclic_FeedbackMsg();
+        basemsg.interconnect = new InterconnectCyclic_FeedbackMsg();
+        basemsg.interconnect.oneof_tool_feedback = new InterconnectCyclic_Feedback_tool_feedbackMsg();
+        basemsg.interconnect.oneof_tool_feedback.gripper_feedback = new GripperCyclic_FeedbackMsg[] { new GripperCyclic_FeedbackMsg()};
+        basemsg.interconnect.oneof_tool_feedback.gripper_feedback[0].motor = new MotorFeedbackMsg[] {new MotorFeedbackMsg()};
+        //basemsg.interconnect.oneof_tool_feedback.gripper_feedback[0].motor[0].
+
+        ros.Publish(baseFeedbackTopic, basemsg);
         if (Time.fixedTimeAsDouble > 10)
         {
             int count = jointArticulations.Count;

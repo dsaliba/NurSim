@@ -26888,6 +26888,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   jointStateTopic: /left_arm/base_feedback/joint_state
+  baseFeedbackTopic: /left_arm/base_feedback
   robotName: left_arm
   publishRateHz: 30
   jointArticulations:
@@ -27395,6 +27396,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   jointStateTopic: /right_arm/base_feedback/joint_state
+  baseFeedbackTopic: /right_arm/base_feedback
   robotName: right_arm
   publishRateHz: 30
   jointArticulations:
