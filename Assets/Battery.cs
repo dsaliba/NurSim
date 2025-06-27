@@ -14,6 +14,7 @@ public class Battery : MonoBehaviour
     public Slider slider;
     public Color defaultColor = Color.green;
     public Color chargingColor = Color.blue;
+    public float min = 0.55f;
     public Image fillImage;
 
     private ROSConnection ros;
@@ -23,7 +24,7 @@ public class Battery : MonoBehaviour
         ros.Subscribe<BatteryStateMsg>(batteryTopicName, msg =>
         {
             fillImage.color = msg.is_charging ? chargingColor : defaultColor;
-            slider.value = msg.charge_level;
+            slider.value = ((msg.charge_level-min)/(1-min));
         });
     }
 

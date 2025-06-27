@@ -7,6 +7,7 @@ using Unity.Robotics.ROSTCPConnector;
 using RosMessageTypes.Sensor;
 using RosMessageTypes.Std;
 using RosMessageTypes.KortexDriver;
+using RosMessageTypes.KinovaPositionalControl;
 
 public class VirtualJointStatePublisher : MonoBehaviour
 {
@@ -14,6 +15,8 @@ public class VirtualJointStatePublisher : MonoBehaviour
     public string jointStateTopic = "/joint_states";
 
     public string baseFeedbackTopic = "/base_feedback";
+    public string forceGraspServiceName = "";
+    public string gripCommmandServiceName = "/base/send_gripper_command";
 
     public string robotName;
 
@@ -22,6 +25,9 @@ public class VirtualJointStatePublisher : MonoBehaviour
 
     [Tooltip("List of ArticulationBodies representing the joints. Names should match joint names in URDF.")]
     public List<ArticulationBody> jointArticulations;
+
+    public ArticulationBody leftGripperFinger;
+    public ArticulationBody rightGripperFinger;
 
     private float publishInterval;
     private float timeSinceLastPublish;
@@ -50,10 +56,41 @@ public class VirtualJointStatePublisher : MonoBehaviour
         ros = ROSConnection.GetOrCreateInstance();
         ros.RegisterPublisher<JointStateMsg>(jointStateTopic);
         ros.RegisterPublisher<BaseCyclic_FeedbackMsg>(baseFeedbackTopic);
+        //ros.ImplementService<GripperForceGraspingRequest, GripperForceGraspingResponse>(forceGraspServiceName, ForceGrasp);
+        ros.ImplementService<SendGripperCommandRequest, SendGripperCommandResponse>(gripCommmandServiceName, GripCommand);
 
         publishInterval = 1f / publishRateHz;
         timeSinceLastPublish = 0f;
         ros.Subscribe<ClockMsg>("/clock", ClockCallback);
+    }
+
+    public SendGripperCommandResponse GripCommand(SendGripperCommandRequest request)
+    {
+        float commandValue = request.input.gripper.finger[0].value;
+        float desiredVelocity = commandValue == 0 ? 0.08f : commandValue;
+
+        ApplyGripperForce(leftGripperFinger, desiredVelocity);
+        ApplyGripperForce(rightGripperFinger, desiredVelocity);
+
+        return new SendGripperCommandResponse();
+    }
+
+    private void ApplyGripperForce(ArticulationBody finger, float velocity)
+    {
+        ArticulationDrive drive = finger.xDrive;
+        drive.stiffness = 0f;       // No positional spring force
+        drive.damping = 10f;        // Damping helps stabilize motion
+        drive.forceLimit = 100f;    // Maximum force output
+        drive.targetVelocity = velocity;
+        finger.xDrive = drive;
+    }
+
+    public GripperForceGraspingResponse ForceGrasp(GripperForceGraspingRequest request)
+    {
+        Debug.LogWarning(request.target_current);
+        leftGripperFinger.SetDriveTarget(ArticulationDriveAxis.X, request.target_current);
+        rightGripperFinger.SetDriveTarget(ArticulationDriveAxis.X, request.target_current);
+        return new GripperForceGraspingResponse();
     }
 
     void Update()

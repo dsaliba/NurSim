@@ -9155,6 +9155,162 @@ MonoBehaviour:
   jointName: gopher/left_arm_tool_frame_joint
   EffortLimit: 1000
   VelocityLimit: 1000
+--- !u!1 &981043742274609900
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1268227748137258207}
+  - component: {fileID: 110703215194127267}
+  - component: {fileID: 420519335225245002}
+  - component: {fileID: 3951292624164328558}
+  - component: {fileID: 6408792749355225013}
+  m_Layer: 15
+  m_Name: Camera
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1268227748137258207
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 981043742274609900}
+  serializedVersion: 2
+  m_LocalRotation: {x: -0.5, y: 0.5, z: 0.5, w: 0.5}
+  m_LocalPosition: {x: -0.04, y: 0.036, z: -0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 6489680040901265937}
+  m_LocalEulerAnglesHint: {x: -90, y: 90, z: 0}
+--- !u!20 &110703215194127267
+Camera:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 981043742274609900}
+  m_Enabled: 1
+  serializedVersion: 2
+  m_ClearFlags: 1
+  m_BackGroundColor: {r: 0.19215687, g: 0.3019608, b: 0.4745098, a: 0}
+  m_projectionMatrixMode: 1
+  m_GateFitMode: 2
+  m_FOVAxisMode: 0
+  m_Iso: 200
+  m_ShutterSpeed: 0.005
+  m_Aperture: 16
+  m_FocusDistance: 10
+  m_FocalLength: 50
+  m_BladeCount: 5
+  m_Curvature: {x: 2, y: 11}
+  m_BarrelClipping: 0.25
+  m_Anamorphism: 0
+  m_SensorSize: {x: 36, y: 24}
+  m_LensShift: {x: 0, y: 0}
+  m_NormalizedViewPortRect:
+    serializedVersion: 2
+    x: 0
+    y: 0
+    width: 1
+    height: 1
+  near clip plane: 0.01
+  far clip plane: 15
+  field of view: 60
+  orthographic: 0
+  orthographic size: 5
+  m_Depth: 0
+  m_CullingMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  m_RenderingPath: -1
+  m_TargetTexture: {fileID: 0}
+  m_TargetDisplay: 0
+  m_TargetEye: 3
+  m_HDR: 1
+  m_AllowMSAA: 1
+  m_AllowDynamicResolution: 0
+  m_ForceIntoRT: 0
+  m_OcclusionCulling: 1
+  m_StereoConvergence: 10
+  m_StereoSeparation: 0.022
+--- !u!81 &420519335225245002
+AudioListener:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 981043742274609900}
+  m_Enabled: 1
+--- !u!114 &3951292624164328558
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 981043742274609900}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a79441f348de89743a2939f4d699eac1, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  m_RenderShadows: 1
+  m_RequiresDepthTextureOption: 2
+  m_RequiresOpaqueTextureOption: 2
+  m_CameraType: 0
+  m_Cameras: []
+  m_RendererIndex: -1
+  m_VolumeLayerMask:
+    serializedVersion: 2
+    m_Bits: 1
+  m_VolumeTrigger: {fileID: 0}
+  m_VolumeFrameworkUpdateModeOption: 2
+  m_RenderPostProcessing: 0
+  m_Antialiasing: 0
+  m_AntialiasingQuality: 2
+  m_StopNaN: 0
+  m_Dithering: 0
+  m_ClearDepth: 1
+  m_AllowXRRendering: 1
+  m_AllowHDROutput: 1
+  m_UseScreenCoordOverride: 0
+  m_ScreenSizeOverride: {x: 0, y: 0, z: 0, w: 0}
+  m_ScreenCoordScaleBias: {x: 0, y: 0, z: 0, w: 0}
+  m_RequiresDepthTexture: 0
+  m_RequiresColorTexture: 0
+  m_Version: 2
+  m_TaaSettings:
+    quality: 3
+    frameInfluence: 0.1
+    jitterScale: 1
+    mipBias: 0
+    varianceClampScale: 0.9
+    contrastAdaptiveSharpening: 0
+--- !u!114 &6408792749355225013
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 981043742274609900}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ce9d4443481d78b4dbd2013629721d2a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  cameraName: camera
+  fps: 30
+  width: 640
+  height: 480
+  jpegQuality: 75
+  targetPort: -1
 --- !u!1 &990781510158345895
 GameObject:
   m_ObjectHideFlags: 0
@@ -20714,6 +20870,7 @@ Transform:
   - {fileID: 5152891483874257271}
   - {fileID: 7612944751291897102}
   - {fileID: 3000382484436722831}
+  - {fileID: 1268227748137258207}
   - {fileID: 5630993375452154788}
   - {fileID: 5577960044531945872}
   m_Father: {fileID: 1521574028560620601}
@@ -26889,6 +27046,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   jointStateTopic: /left_arm/base_feedback/joint_state
   baseFeedbackTopic: /left_arm/base_feedback
+  forceGraspServiceName: 
+  gripCommmandServiceName: /base/send_gripper_command
   robotName: left_arm
   publishRateHz: 30
   jointArticulations:
@@ -26900,6 +27059,8 @@ MonoBehaviour:
   - {fileID: 4793937014380757148}
   - {fileID: 4033364744637331922}
   - {fileID: 4033364744637331922}
+  leftGripperFinger: {fileID: 0}
+  rightGripperFinger: {fileID: 0}
 --- !u!1 &7628781304040955771
 GameObject:
   m_ObjectHideFlags: 0
@@ -26973,7 +27134,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 7628781304040955771}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 20eb779221b812a498f07e30da1d8760, type: 3}
   m_Name: 
@@ -27397,6 +27558,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   jointStateTopic: /right_arm/base_feedback/joint_state
   baseFeedbackTopic: /right_arm/base_feedback
+  forceGraspServiceName: /right_arm/gripper_controll/foce_grasping
+  gripCommmandServiceName: /right_arm/base/send_gripper_command
   robotName: right_arm
   publishRateHz: 30
   jointArticulations:
@@ -27408,6 +27571,8 @@ MonoBehaviour:
   - {fileID: 5553209666230227735}
   - {fileID: 5541510279306631820}
   - {fileID: 5541510279306631820}
+  leftGripperFinger: {fileID: 5322647020131956288}
+  rightGripperFinger: {fileID: 213131015288829517}
 --- !u!114 &6656675784588602285
 MonoBehaviour:
   m_ObjectHideFlags: 0

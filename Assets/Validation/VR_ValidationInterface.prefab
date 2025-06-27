@@ -667,6 +667,14 @@ PrefabInstance:
     serializedVersion: 3
     m_TransformParent: {fileID: 9170226941633462669}
     m_Modifications:
+    - target: {fileID: 2167659680746135376, guid: ea4dc053522c8374dae7e595b89b6844, type: 3}
+      propertyPath: m_AnchorMax.x
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 2167659680746135376, guid: ea4dc053522c8374dae7e595b89b6844, type: 3}
+      propertyPath: m_AnchorMax.y
+      value: 0
+      objectReference: {fileID: 0}
     - target: {fileID: 4614127054231940094, guid: ea4dc053522c8374dae7e595b89b6844, type: 3}
       propertyPath: m_LocalPosition.x
       value: 0
@@ -706,6 +714,10 @@ PrefabInstance:
     - target: {fileID: 4614127054231940094, guid: ea4dc053522c8374dae7e595b89b6844, type: 3}
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 5820961204768317114, guid: ea4dc053522c8374dae7e595b89b6844, type: 3}
+      propertyPath: cameraName
+      value: camera
       objectReference: {fileID: 0}
     - target: {fileID: 6287253735072360466, guid: ea4dc053522c8374dae7e595b89b6844, type: 3}
       propertyPath: m_Name

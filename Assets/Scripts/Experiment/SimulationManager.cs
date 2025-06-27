@@ -68,6 +68,8 @@ public class SimulationManager : MonoBehaviour
             }
             lastLatch = msg.data;
         });
+        ros.RegisterPublisher<BoolMsg>("/ui/show_hints");
+        HTTPDash.Instance.RegisterDropdown("Show Hints", "Update", new string[] { "On", "Off"}, s => ros.Publish("/ui/show_hints", new BoolMsg(s.Equals("On"))));
         HTTPDash.Instance.RegisterDropdown("Test Dropdown", "Press Me Too", new string[]{"Dimitri", "Nikita", "Lorena"}, s => Debug.LogWarning(s));
         HTTPDash.Instance.RegisterInput("Test Input", "Press Me Last", "Write here", s => Debug.LogWarning(s));
         HTTPDash.Instance.RegisterInput("Dash Message", "Send", "Write here", s => ros.Publish("trial/dash", new StringMsg(s)));

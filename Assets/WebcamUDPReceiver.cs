@@ -1,10 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Diagnostics;
-using System.Linq;
 using RosMessageTypes.Std;
 using Unity.Robotics.ROSTCPConnector;
 using UnityEngine;
@@ -29,8 +28,9 @@ public class UDPWebcamReceiver : MonoBehaviour
     private static Dictionary<int, UDPWebcamReceiver> socketHogs = new Dictionary<int, UDPWebcamReceiver>();
 
     protected ROSConnection ros;
-    
+
     private Stopwatch stopwatch = Stopwatch.StartNew();
+    private volatile bool isRunning = true;
 
     private class FrameBuffer
     {
@@ -46,15 +46,16 @@ public class UDPWebcamReceiver : MonoBehaviour
     {
         ros = ROSConnection.GetOrCreateInstance();
         rawImageUI = GetComponent<RawImage>();
+
         ros.Subscribe<StringMsg>("udpcam/ports", msg =>
         {
             if (port < 0)
             {
                 string[] existing = msg.data.Split('&');
-                for (int i = 0; i < existing.Length; i++)
+                foreach (string entry in existing)
                 {
-                    string[] item = existing[i].Split(":");
-                    if (item[0].Equals(cameraName))
+                    string[] item = entry.Split(':');
+                    if (item[0] == cameraName)
                     {
                         port = int.Parse(item[1]);
                         ConnectToPort();
@@ -65,38 +66,46 @@ public class UDPWebcamReceiver : MonoBehaviour
                 }
             }
         });
-        
-        receivedTexture = new Texture2D(2, 2, TextureFormat.RGB24, false);
+
+        receivedTexture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
     }
 
     void ConnectToPort()
     {
-        Debug.LogWarning(string.Join(", ", udpClients.Keys.ToArray()));
         if (udpClients.ContainsKey(port))
         {
-            socketHogs[port].receiveThread?.Abort();
+            socketHogs[port].StopThread();
             udpClient = udpClients[port];
             socketHogs[port] = this;
-            Debug.LogWarning("Arresting Port " + port);
         }
         else
         {
-           
             udpClient = new UdpClient(port);
             udpClients.Add(port, udpClient);
             socketHogs.Add(port, this);
         }
     }
 
+    void StopThread()
+    {
+        isRunning = false;
+        receiveThread?.Join();
+    }
+
     void ReceiveLoop()
     {
-        
         IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, port);
 
-        while (true)
+        while (isRunning)
         {
             try
             {
+                if (udpClient.Available == 0)
+                {
+                    Thread.Sleep(1);
+                    continue;
+                }
+
                 byte[] data = udpClient.Receive(ref remoteEP);
 
                 if (data.Length < 8)
@@ -105,9 +114,6 @@ public class UDPWebcamReceiver : MonoBehaviour
                 uint frameId = (uint)(data[0] << 24 | data[1] << 16 | data[2] << 8 | data[3]);
                 ushort totalFragments = (ushort)((data[4] << 8) | data[5]);
                 ushort fragmentIndex = (ushort)((data[6] << 8) | data[7]);
-
-                // 🔍 Log header info
-                UnityEngine.Debug.Log($"Received packet: FrameID={frameId}, Total={totalFragments}, Index={fragmentIndex}");
 
                 byte[] payload = new byte[data.Length - 8];
                 Buffer.BlockCopy(data, 8, payload, 0, payload.Length);
@@ -126,7 +132,7 @@ public class UDPWebcamReceiver : MonoBehaviour
                         frameBuffers[frameId] = buffer;
                     }
 
-                    if (buffer.fragments[fragmentIndex] == null)
+                    if (fragmentIndex < buffer.fragments.Length && buffer.fragments[fragmentIndex] == null)
                     {
                         buffer.fragments[fragmentIndex] = payload;
                         buffer.receivedCount++;
@@ -153,7 +159,7 @@ public class UDPWebcamReceiver : MonoBehaviour
             }
             catch (Exception e)
             {
-                UnityEngine.Debug.LogWarning("Receive error: " + e.Message);
+                Debug.LogWarning("Receive error: " + e.Message);
             }
         }
     }
@@ -174,13 +180,11 @@ public class UDPWebcamReceiver : MonoBehaviour
             foreach (var id in stale)
             {
                 frameBuffers.Remove(id);
-                UnityEngine.Debug.LogWarning($"Dropped frame {id} due to timeout.");
             }
         }
 
         if (completeFrame != null)
         {
-            
             byte[] frameToDisplay;
             lock (frameLock)
             {
@@ -190,28 +194,23 @@ public class UDPWebcamReceiver : MonoBehaviour
 
             if (frameToDisplay != null)
             {
-                // Recreate texture fresh every frame to avoid format/size issues
-                receivedTexture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                
-                bool success = receivedTexture.LoadImage(frameToDisplay);
-                if (success)
+                if (!receivedTexture.LoadImage(frameToDisplay, false))
                 {
-                    rawImageUI.texture = receivedTexture;
-                    rawImageUI.SetNativeSize(); // Optional, adjust to image size
+                    Debug.LogWarning("Failed to decode image.");
                 }
                 else
                 {
-                    UnityEngine.Debug.LogWarning("Failed to decode JPEG image.");
+                    rawImageUI.texture = receivedTexture;
+                    rawImageUI.SetNativeSize();
                 }
             }
-
         }
     }
 
     void OnApplicationQuit()
     {
-        receiveThread?.Abort();
+        isRunning = false;
+        receiveThread?.Join();
         udpClient?.Close();
     }
-
 }
