@@ -15,7 +15,6 @@ public class VirtualJointStatePublisher : MonoBehaviour
     public string jointStateTopic = "/joint_states";
 
     public string baseFeedbackTopic = "/base_feedback";
-    public string forceGraspServiceName = "";
     public string gripCommmandServiceName = "/base/send_gripper_command";
 
     public string robotName;
@@ -33,16 +32,19 @@ public class VirtualJointStatePublisher : MonoBehaviour
     private float timeSinceLastPublish;
 
     private ROSConnection ros;
-    
-    private TimeMsg currentRosTime;
 
-    
+    // ---- Minimal changes for better gripper control ----
+    [Header("Gripper Control Settings")]
+    [SerializeField] private float gripperClosedPosition = -0.02f;
+    [SerializeField] private float gripperOpenPosition = 0.0f;
+    [SerializeField] private float gripperMoveSpeed = 0.02f; // meters per second
+    [SerializeField] private float gripperStiffness = 15000f;
+    [SerializeField] private float gripperDamping = 500f;
+    [SerializeField] private float gripperForceLimit = 1000f;
 
-
-    void ClockCallback(ClockMsg clockMsg)
-    {
-        currentRosTime = clockMsg.clock;
-    }
+    private float desiredGripperPosition = 0f;
+    private float currentGripperPosition = 0f;
+    // -----------------------------------------------------
 
     void Start()
     {
@@ -56,46 +58,52 @@ public class VirtualJointStatePublisher : MonoBehaviour
         ros = ROSConnection.GetOrCreateInstance();
         ros.RegisterPublisher<JointStateMsg>(jointStateTopic);
         ros.RegisterPublisher<BaseCyclic_FeedbackMsg>(baseFeedbackTopic);
-        //ros.ImplementService<GripperForceGraspingRequest, GripperForceGraspingResponse>(forceGraspServiceName, ForceGrasp);
+
         ros.ImplementService<SendGripperCommandRequest, SendGripperCommandResponse>(gripCommmandServiceName, GripCommand);
 
         publishInterval = 1f / publishRateHz;
         timeSinceLastPublish = 0f;
-        ros.Subscribe<ClockMsg>("/clock", ClockCallback);
     }
 
     public SendGripperCommandResponse GripCommand(SendGripperCommandRequest request)
     {
         float commandValue = request.input.gripper.finger[0].value;
-        float desiredVelocity = commandValue == 0 ? 0.08f : commandValue;
 
-        ApplyGripperForce(leftGripperFinger, desiredVelocity);
-        ApplyGripperForce(rightGripperFinger, desiredVelocity);
+        // Zero means open, non-zero means close
+        if (commandValue == 0)
+            desiredGripperPosition = gripperOpenPosition;
+        else
+            desiredGripperPosition = gripperClosedPosition;
+
+        Debug.Log($"[Gripper] Command received: {commandValue} → TargetPos: {desiredGripperPosition}");
 
         return new SendGripperCommandResponse();
     }
 
-    private void ApplyGripperForce(ArticulationBody finger, float velocity)
+    private void ApplyGripperPosition(ArticulationBody finger, float position)
     {
         ArticulationDrive drive = finger.xDrive;
-        drive.stiffness = 0f;       // No positional spring force
-        drive.damping = 10f;        // Damping helps stabilize motion
-        drive.forceLimit = 100f;    // Maximum force output
-        drive.targetVelocity = velocity;
+        drive.stiffness = gripperStiffness;
+        drive.damping = gripperDamping;
+        drive.forceLimit = gripperForceLimit;
+        drive.target = position;
         finger.xDrive = drive;
     }
 
-    public GripperForceGraspingResponse ForceGrasp(GripperForceGraspingRequest request)
+    void FixedUpdate()
     {
-        Debug.LogWarning(request.target_current);
-        leftGripperFinger.SetDriveTarget(ArticulationDriveAxis.X, request.target_current);
-        rightGripperFinger.SetDriveTarget(ArticulationDriveAxis.X, request.target_current);
-        return new GripperForceGraspingResponse();
-    }
+        // Smoothly move toward desired position
+        currentGripperPosition = Mathf.MoveTowards(
+            currentGripperPosition,
+            desiredGripperPosition,
+            gripperMoveSpeed * Time.fixedDeltaTime
+        );
 
-    void Update()
-    {
-        timeSinceLastPublish += Time.deltaTime;
+        ApplyGripperPosition(leftGripperFinger, currentGripperPosition);
+        ApplyGripperPosition(rightGripperFinger, -currentGripperPosition); // mirror
+
+        // ROS publish timer
+        timeSinceLastPublish += Time.fixedDeltaTime;
         if (timeSinceLastPublish >= publishInterval)
         {
             PublishJointState();
@@ -108,16 +116,17 @@ public class VirtualJointStatePublisher : MonoBehaviour
         BaseCyclic_FeedbackMsg basemsg = new BaseCyclic_FeedbackMsg();
         basemsg.interconnect = new InterconnectCyclic_FeedbackMsg();
         basemsg.interconnect.oneof_tool_feedback = new InterconnectCyclic_Feedback_tool_feedbackMsg();
-        basemsg.interconnect.oneof_tool_feedback.gripper_feedback = new GripperCyclic_FeedbackMsg[] { new GripperCyclic_FeedbackMsg()};
-        basemsg.interconnect.oneof_tool_feedback.gripper_feedback[0].motor = new MotorFeedbackMsg[] {new MotorFeedbackMsg()};
-        //basemsg.interconnect.oneof_tool_feedback.gripper_feedback[0].motor[0].
+        basemsg.interconnect.oneof_tool_feedback.gripper_feedback = new GripperCyclic_FeedbackMsg[] { new GripperCyclic_FeedbackMsg() };
+        basemsg.interconnect.oneof_tool_feedback.gripper_feedback[0].motor = new MotorFeedbackMsg[] { new MotorFeedbackMsg() };
 
         ros.Publish(baseFeedbackTopic, basemsg);
+
         if (Time.fixedTimeAsDouble > 10)
         {
             int count = jointArticulations.Count;
             DateTime now = DateTime.UtcNow;
             TimeSpan sinceEpoch = now - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
             var msg = new JointStateMsg
             {
                 header = new HeaderMsg
@@ -138,21 +147,15 @@ public class VirtualJointStatePublisher : MonoBehaviour
             for (int i = 0; i < count; i++)
             {
                 var joint = jointArticulations[i];
-                string jointName = $"{robotName}/joint_{i+1}";
-
-                // Get joint state (position, velocity, effort)
-                float jointPosition = joint.jointPosition[0]; // assumes 1-DOF
-                float jointVelocity = joint.jointVelocity[0];
-                float jointEffort = joint.jointForce[0];
+                string jointName = $"{robotName}/joint_{i + 1}";
 
                 msg.name[i] = jointName;
-                msg.position[i] = jointPosition;
-                msg.velocity[i] = jointVelocity;
-                msg.effort[i] = jointEffort;
+                msg.position[i] = joint.jointPosition[0];
+                msg.velocity[i] = joint.jointVelocity[0];
+                msg.effort[i] = joint.jointForce[0];
             }
 
             ros.Publish(jointStateTopic, msg);
         }
-        
     }
 }

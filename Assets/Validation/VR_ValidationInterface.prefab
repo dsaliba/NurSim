@@ -723,6 +723,10 @@ PrefabInstance:
       propertyPath: m_Name
       value: OculusInterface
       objectReference: {fileID: 0}
+    - target: {fileID: 8578736568228422722, guid: ea4dc053522c8374dae7e595b89b6844, type: 3}
+      propertyPath: m_IsActive
+      value: 1
+      objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects:
