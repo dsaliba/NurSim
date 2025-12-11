@@ -7301,7 +7301,7 @@ Camera:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 3234327121106105879}
-  m_Enabled: 0
+  m_Enabled: 1
   serializedVersion: 2
   m_ClearFlags: 1
   m_BackGroundColor: {r: 0.19215687, g: 0.3019608, b: 0.4745098, a: 0}
@@ -15759,6 +15759,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 0428f32b26f146c4a875dd6efa4e6de7, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  rosTopic: /ui/canvas_image/compressed
+  jpegQuality: 75
+  publishHz: 25
 --- !u!1 &6286965016138859673
 GameObject:
   m_ObjectHideFlags: 0
@@ -17298,7 +17301,7 @@ Camera:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 6842244638409019927}
-  m_Enabled: 1
+  m_Enabled: 0
   serializedVersion: 2
   m_ClearFlags: 1
   m_BackGroundColor: {r: 0.19215687, g: 0.3019608, b: 0.4745098, a: 0}
@@ -17401,7 +17404,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 6842244638409019927}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: e274f46ba37a4bc4e90436e0fe936d3b, type: 3}
   m_Name: 
@@ -21721,15 +21724,15 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 6899841363411100261, guid: 84cd14f4dcefad2479ae9a6080a6c063, type: 3}
       propertyPath: m_LocalScale.x
-      value: 2.1
+      value: 1.5
       objectReference: {fileID: 0}
     - target: {fileID: 6899841363411100261, guid: 84cd14f4dcefad2479ae9a6080a6c063, type: 3}
       propertyPath: m_LocalScale.y
-      value: 2.1
+      value: 1.5
       objectReference: {fileID: 0}
     - target: {fileID: 6899841363411100261, guid: 84cd14f4dcefad2479ae9a6080a6c063, type: 3}
       propertyPath: m_LocalScale.z
-      value: 2.1
+      value: 1.5
       objectReference: {fileID: 0}
     - target: {fileID: 6899841363411100261, guid: 84cd14f4dcefad2479ae9a6080a6c063, type: 3}
       propertyPath: m_LocalPosition.x
