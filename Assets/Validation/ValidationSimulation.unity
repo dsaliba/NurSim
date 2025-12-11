@@ -272,15 +272,15 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 84120adf24899fb4382eba284e5685f3, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  unitySystemIP: 130.215.181.6
+  unitySystemIP: 130.215.182.19
   environmentSceneNames:
   - Unity200A
   - HospitalNew
   interfaces:
-  - name: VR
-    prefab: {fileID: 7253451991368956462, guid: 5252a7539e8a0cc4885f50adb6e22dd8, type: 3}
   - name: Default
     prefab: {fileID: 6287253735072360466, guid: db57ee8559b861a40920abb952ef2896, type: 3}
+  - name: VR
+    prefab: {fileID: 7253451991368956462, guid: 5252a7539e8a0cc4885f50adb6e22dd8, type: 3}
   loadOnStart: 1
 --- !u!4 &791946144
 Transform:
