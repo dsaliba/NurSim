@@ -24,7 +24,7 @@ RenderSettings:
   m_AmbientEquatorColor: {r: 0.114, g: 0.125, b: 0.133, a: 1}
   m_AmbientGroundColor: {r: 0.047, g: 0.043, b: 0.035, a: 1}
   m_AmbientIntensity: 1
-  m_AmbientMode: 3
+  m_AmbientMode: 0
   m_SubtractiveShadowColor: {r: 0.42, g: 0.478, b: 0.627, a: 1}
   m_SkyboxMaterial: {fileID: 2100000, guid: b9cb58d37ba0b224886008db63d41413, type: 2}
   m_HaloStrength: 0.5
@@ -272,11 +272,16 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 84120adf24899fb4382eba284e5685f3, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  unitySystemIP: 130.215.181.6
+  unitySystemIP: 130.215.183.99
   environmentSceneNames:
+  - Unity200A Fitts
   - Unity200A
   - HospitalNew
   interfaces:
+  - name: Default
+    prefab: {fileID: 0}
+  - name: Fitts
+    prefab: {fileID: 6287253735072360466, guid: 33036383184602240b0bbe0e5c621e45, type: 3}
   - name: VR
     prefab: {fileID: 7253451991368956462, guid: 5252a7539e8a0cc4885f50adb6e22dd8, type: 3}
   - name: Default
@@ -321,7 +326,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5b66a187ee5da4e419f5e0790633e984, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  localIP: 130.215.181.6
+  localIP: 130.215.183.99
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

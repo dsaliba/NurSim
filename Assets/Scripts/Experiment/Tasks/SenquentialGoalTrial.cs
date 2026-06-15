@@ -13,46 +13,68 @@ public class SenquentialGoalTrial : Trial
     {
         base.Start();
         ros.RegisterPublisher<Float64Msg>("trial/distance_to_goal");
-        ros.RegisterPublisher<Int32Msg>("trial/goal_index", latch:true);
-        ros.RegisterPublisher<StringMsg>("trial/progress_description", latch:true);
-        ros.RegisterPublisher<StringMsg>("trial/current_hint", latch:true);
+        ros.RegisterPublisher<Int32Msg>("trial/goal_index", latch: true);
+        ros.RegisterPublisher<StringMsg>("trial/progress_description", latch: true);
+        ros.RegisterPublisher<StringMsg>("trial/current_hint", latch: true);
+
+        // Disable all goals up front, then advance to the first one.
+        GameObject[] goals = base.environment.getObjectListByKey("goals");
+        foreach (var g in goals)
+            if (g != null) g.SetActive(false);
+
         OnGoalCompleted();
         StartTrial();
-        
     }
 
     public void OnGoalCompleted()
     {
-        HTTPDash.Instance.SendNotification("Goal Reached", "Robot reached goal #" + currentGoalIndex, "green");
+        HTTPDash.Instance.SendNotification(
+            "Goal Reached", "Robot reached goal #" + currentGoalIndex, "green");
+
         GameObject[] goals = base.environment.getObjectListByKey("goals");
+
+        // Disable the goal that just completed.
+        if (currentGoalIndex >= 0 && currentGoalIndex < goals.Length)
+        {
+            GameObject prev = goals[currentGoalIndex];
+            if (prev != null) prev.SetActive(false);
+        }
+
         GoalStepping:
         currentGoalIndex++;
+
         if (currentGoalIndex >= goals.Length)
         {
-            ros.Publish("trial/goal_index", new Int32Msg(currentGoalIndex));
-            ros.Publish("trial/progress_description", new StringMsg((currentGoalIndex) + "/" +goals.Length));
+            ros.Publish("trial/goal_index",
+                new Int32Msg(currentGoalIndex));
+            ros.Publish("trial/progress_description",
+                new StringMsg(currentGoalIndex + "/" + goals.Length));
             StopTrial();
+            return;
         }
-        else
+
+        // Skip nulls or objects missing a TrialGoal component.
+        TrialGoal nextGoal = goals[currentGoalIndex]?.GetComponent<TrialGoal>();
+        if (nextGoal == null)
         {
-            TrialGoal nextGoal = goals[currentGoalIndex].gameObject.GetComponent<TrialGoal>();
-            if (nextGoal == null)
-            {
-                Debug.LogWarning("Object at index " + currentGoalIndex + " of goals list does not have component of type TrialGoal, this may corrupt goal indexing for sequential trials.");
-                goto GoalStepping;
-            }
-            nextGoal.onComplete += OnGoalCompleted;
-            nextGoal.Activate();
-            ros.Publish("trial/current_hint", new StringMsg(nextGoal.contextMessage));
-            ros.Publish("trial/progress_description", new StringMsg((currentGoalIndex) + "/" +goals.Length));
-            if (currentGoalIndex > 0)
-            {
-                ros.Publish("trial/goal_index", new Int32Msg(currentGoalIndex));
-                
-            }
+            Debug.LogWarning("Object at index " + currentGoalIndex +
+                " of goals list does not have component of type TrialGoal, " +
+                "this may corrupt goal indexing for sequential trials.");
+            goto GoalStepping;
         }
-        
-        
+
+        // Enable the GameObject, wire completion, then activate.
+        goals[currentGoalIndex].SetActive(true);
+        nextGoal.onComplete += OnGoalCompleted;
+        nextGoal.Activate();
+
+        ros.Publish("trial/current_hint",
+            new StringMsg(nextGoal.contextMessage));
+        ros.Publish("trial/progress_description",
+            new StringMsg(currentGoalIndex + "/" + goals.Length));
+
+        if (currentGoalIndex > 0)
+            ros.Publish("trial/goal_index", new Int32Msg(currentGoalIndex));
     }
 
     public void UpdateDistanceToNextGoal()
@@ -62,16 +84,14 @@ public class SenquentialGoalTrial : Trial
             ros.Publish("trial/distance_to_goal", new Float64Msg(0));
             return;
         }
-        
-        GameObject robot = environment.getObjectListByKey("robots")[
-            0];
-        GameObject goal =
-            environment.getObjectListByKey("goals")[currentGoalIndex];
-        double distance = Vector3.Distance(robot.transform.position, goal.transform.position);
+
+        GameObject robot = environment.getObjectListByKey("robots")[0];
+        GameObject goal  = environment.getObjectListByKey("goals")[currentGoalIndex];
+        double distance  = Vector3.Distance(
+            robot.transform.position, goal.transform.position);
         ros.Publish("trial/distance_to_goal", new Float64Msg(distance));
     }
 
-    
     public new void Update()
     {
         base.Update();
