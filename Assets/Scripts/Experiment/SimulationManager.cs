@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using RosMessageTypes.Std;
 using Unity.Robotics.ROSTCPConnector;
 using UnityEngine;
@@ -14,10 +15,23 @@ public class SimulationManager : MonoBehaviour
         public GameObject prefab;
     }
 
+    [System.Serializable]
+    public class MappingFileOption
+    {
+        public string displayName;   // Label shown in the dashboard dropdown
+        public string filePath;      // Value published to /mapping_player/file_path
+    }
+
     [SerializeField]
     public string unitySystemIP = "127.0.0.1";
     public string[] environmentSceneNames;
     public NamedPrefab[] interfaces;
+
+    [Header("Camera Selection")]
+    public string[] cameraOptions = new string[] { "Front", "Back", "Side" };
+
+    [Header("Mapping Files")]
+    public List<MappingFileOption> mappingFileOptions = new List<MappingFileOption>();
 
     public bool loadOnStart = true;
 
@@ -34,8 +48,9 @@ public class SimulationManager : MonoBehaviour
         ros = ROSConnection.GetOrCreateInstance();
         ros.RegisterPublisher<StringMsg>("unity/ip", latch: true);
         ros.RegisterPublisher<StringMsg>("trial/dash");
-        ros.RegisterPublisher<StringMsg>("/task/error");
         ros.RegisterPublisher<BoolMsg>("/task/end");
+        ros.RegisterPublisher<StringMsg>("/unity/camera_selection");
+        ros.RegisterPublisher<StringMsg>("/mapping_player/file_path");
 
         if (loadOnStart)
         {
@@ -56,39 +71,165 @@ public class SimulationManager : MonoBehaviour
             lastLatch = msg.data;
         });
 
-        ros.RegisterPublisher<BoolMsg>("/ui/show_hints");
         HTTPDash.Instance.RegisterButton("End Task", "End",
             s => ros.Publish("/task/end", new BoolMsg(true)));
-        HTTPDash.Instance.RegisterButton("Bedhead Collision", "Mark", (string s) =>
+
+        RegisterEnvironmentDashboardControls();
+        RegisterInterfaceDashboardControls();
+        RegisterCameraDashboardControls();
+        RegisterMappingFileDashboardControls();
+    }
+
+    // ── Environment scene reinitialize/load dropdown ───────────────────────
+    private void RegisterEnvironmentDashboardControls()
+    {
+        if (environmentSceneNames == null || environmentSceneNames.Length == 0)
         {
-            ros.Publish("/task/error", new StringMsg("bedhead_collision"));
-            HTTPDash.Instance.SendNotification("Error Logged", "Bedhead Collision", "orange");
-        });
-        HTTPDash.Instance.RegisterButton("Unplug Fail", "Mark", (string s) =>
+            Debug.LogWarning("SimulationManager: No environment scene names configured for dashboard.");
+            return;
+        }
+
+        HTTPDash.Instance.RegisterDropdown(
+            "Environment Scene",
+            "Load / Reinitialize",
+            environmentSceneNames,
+            (string selectedSceneName) =>
+            {
+                int index = System.Array.IndexOf(environmentSceneNames, selectedSceneName);
+                if (index < 0)
+                {
+                    Debug.LogWarning($"SimulationManager: Unknown environment scene '{selectedSceneName}' from dashboard.");
+                    return;
+                }
+
+                HTTPDash.Instance.SendNotification("Environment Loading",
+                    $"Reinitializing scene: {selectedSceneName}", "blue");
+
+                StartCoroutine(ReloadEnvironmentSceneAsync(index));
+            });
+    }
+
+    /// <summary>
+    /// Unloads the currently active environment scene (if any) and loads the
+    /// requested one, mirroring ResetEnvironmentCoroutine but for an
+    /// arbitrary target index chosen from the dashboard.
+    /// </summary>
+    private IEnumerator ReloadEnvironmentSceneAsync(int sceneIndex)
+    {
+        if (!string.IsNullOrEmpty(activeEnvironmentName))
         {
-            ros.Publish("/task/error", new StringMsg("unplug_fail"));
-            HTTPDash.Instance.SendNotification("Error Logged", "Unplug Fail", "orange");
-        });
-        HTTPDash.Instance.RegisterButton("Plug Fail", "Mark", (string s) =>
+            if (TaskEnvironment.instances.Count > TaskEnvironment.currentIndex &&
+                TaskEnvironment.currentIndex >= 0)
+            {
+                TaskEnvironment.instances.Remove(
+                    TaskEnvironment.instances[TaskEnvironment.currentIndex]);
+            }
+
+            AsyncOperation unloadOp = SceneManager.UnloadSceneAsync(activeEnvironmentName);
+            if (unloadOp != null)
+                while (!unloadOp.isDone)
+                    yield return null;
+        }
+
+        yield return StartCoroutine(LoadEnvironmentSceneAsync(sceneIndex));
+    }
+
+    // ── Interface reinitialize/load dropdown ────────────────────────────────
+    private void RegisterInterfaceDashboardControls()
+    {
+        if (interfaces == null || interfaces.Length == 0)
         {
-            ros.Publish("/task/error", new StringMsg("plug_fail"));
-            HTTPDash.Instance.SendNotification("Error Logged", "Plug Fail", "orange");
-        });
-        HTTPDash.Instance.RegisterButton("Environment Collision", "Mark", (string s) =>
+            Debug.LogWarning("SimulationManager: No interfaces configured for dashboard.");
+            return;
+        }
+
+        string[] interfaceNames = interfaces.Select(i => i.name).ToArray();
+
+        HTTPDash.Instance.RegisterDropdown(
+            "Interface",
+            "Load / Reinitialize",
+            interfaceNames,
+            (string selectedInterfaceName) =>
+            {
+                int index = System.Array.IndexOf(interfaceNames, selectedInterfaceName);
+                if (index < 0)
+                {
+                    Debug.LogWarning($"SimulationManager: Unknown interface '{selectedInterfaceName}' from dashboard.");
+                    return;
+                }
+
+                HTTPDash.Instance.SendNotification("Interface Loading",
+                    $"Reinitializing interface: {selectedInterfaceName}", "blue");
+
+                ReloadInterfaceScene(index);
+            });
+    }
+
+    /// <summary>
+    /// Destroys the currently active interface prefab instance (if any) and
+    /// instantiates the requested one in its place.
+    /// </summary>
+    private void ReloadInterfaceScene(int sceneIndex)
+    {
+        if (activeInterface != null)
         {
-            ros.Publish("/task/error", new StringMsg("environment_collision"));
-            HTTPDash.Instance.SendNotification("Error Logged", "Environment Collision", "orange");
-        });
-        HTTPDash.Instance.RegisterButton("Pick Fail", "Mark", (string s) =>
+            Destroy(activeInterface);
+        }
+
+        LoadInterfaceScene(sceneIndex);
+    }
+
+    // ── Camera selection dropdown ────────────────────────────────────────
+    private void RegisterCameraDashboardControls()
+    {
+        if (cameraOptions == null || cameraOptions.Length == 0)
         {
-            ros.Publish("/task/error", new StringMsg("pick_fail"));
-            HTTPDash.Instance.SendNotification("Error Logged", "Pick Fail", "orange");
-        });
-        HTTPDash.Instance.RegisterButton("Place Fail", "Mark", (string s) =>
+            Debug.LogWarning("SimulationManager: No camera options configured for dashboard.");
+            return;
+        }
+
+        HTTPDash.Instance.RegisterDropdown(
+            "Camera Selection",
+            "Select",
+            cameraOptions,
+            (string selectedCamera) =>
+            {
+                ros.Publish("/unity/camera_selection", new StringMsg(selectedCamera));
+                HTTPDash.Instance.SendNotification("Camera Switched",
+                    $"Active camera: {selectedCamera}", "blue");
+            });
+    }
+
+    // ── Mapping file toggle dropdown ────────────────────────────────────────
+    private void RegisterMappingFileDashboardControls()
+    {
+        if (mappingFileOptions == null || mappingFileOptions.Count == 0)
         {
-            ros.Publish("/task/error", new StringMsg("place_fail"));
-            HTTPDash.Instance.SendNotification("Error Logged", "Place Fail", "orange");
-        });
+            Debug.LogWarning("SimulationManager: No mapping file options configured for dashboard.");
+            return;
+        }
+
+        string[] displayNames = mappingFileOptions.Select(m => m.displayName).ToArray();
+
+        HTTPDash.Instance.RegisterDropdown(
+            "Mapping File",
+            "Set Active",
+            displayNames,
+            (string selectedDisplayName) =>
+            {
+                MappingFileOption selected = mappingFileOptions
+                    .FirstOrDefault(m => m.displayName == selectedDisplayName);
+
+                if (selected == null)
+                {
+                    Debug.LogWarning($"SimulationManager: Unknown mapping file option '{selectedDisplayName}' from dashboard.");
+                    return;
+                }
+
+                ros.Publish("/mapping_player/file_path", new StringMsg(selected.filePath));
+                HTTPDash.Instance.SendNotification("Mapping File Set",
+                    $"Active mapping: {selected.displayName}", "blue");
+            });
     }
 
     public void ResetCurrentEnvironment()

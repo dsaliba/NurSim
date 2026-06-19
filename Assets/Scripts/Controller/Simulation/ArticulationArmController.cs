@@ -209,6 +209,24 @@ public class ArticulationArmController : ArmController
         );
     }
 
+    /// <summary>
+    ///     Same as <see cref="SetJointAngles"/>, but invokes onComplete after
+    ///     the move finishes (in addition to the usual SwitchToManualControl
+    ///     handoff). Used by preset loading so callers can know when it's
+    ///     safe to resume accepting ROS-driven teleop joint updates, without
+    ///     having to change the ArmController base-class signature used
+    ///     elsewhere.
+    /// </summary>
+    public void SetJointAnglesWithCallback(float[] jointAngles, System.Action onComplete)
+    {
+        controlMode = ControlMode.Auto;
+        jointController.SetJointTargets(jointAngles, false, () =>
+        {
+            SwitchToManualControl();
+            onComplete?.Invoke();
+        });
+    }
+
     // Move the joint following a trajectory
     public void SetJointTrajectory(
         float[] timeSteps, float[][] angles, 

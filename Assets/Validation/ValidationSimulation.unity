@@ -274,11 +274,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   unitySystemIP: 130.215.183.99
   environmentSceneNames:
+  - 
+  - Unity200A Fitts Robot
   - Unity200A Fitts
-  - Unity200A
-  - HospitalNew
   interfaces:
-  - name: Default
+  - name: None
     prefab: {fileID: 0}
   - name: Fitts
     prefab: {fileID: 6287253735072360466, guid: 33036383184602240b0bbe0e5c621e45, type: 3}
@@ -286,7 +286,19 @@ MonoBehaviour:
     prefab: {fileID: 7253451991368956462, guid: 5252a7539e8a0cc4885f50adb6e22dd8, type: 3}
   - name: Default
     prefab: {fileID: 6287253735072360466, guid: db57ee8559b861a40920abb952ef2896, type: 3}
+  cameraOptions:
+  - Front
+  - Back
+  - Side
+  mappingFileOptions:
+  - displayName: Joystick
+    filePath: /catkin_ws/joystick_mapping.json
+  - displayName: Pose
+    filePath: /catkin_ws/pose_mapping.json
   loadOnStart: 1
+  enableFullResetButton: 1
+  fullResetButtonLabel: Full Restart
+  bootstrapSceneName: Bootstrap
 --- !u!4 &791946144
 Transform:
   m_ObjectHideFlags: 0

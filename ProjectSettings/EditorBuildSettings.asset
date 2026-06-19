@@ -29,6 +29,9 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Lab/Unity200A Fitts.unity
     guid: 0d1bb796adb7c434fab02a4f98f9e911
+  - enabled: 1
+    path: Assets/Unity200A Fitts Robot.unity
+    guid: fc000041c41fc26498a9fa1788705ef4
   m_configObjects:
     Unity.XR.Oculus.Settings: {fileID: 11400000, guid: 8b9b4d9b10d950244b442285ce681e70, type: 2}
     Unity.XR.OpenVR.Settings: {fileID: 11400000, guid: 42038b0085844c542ac6abf4bfea5001, type: 2}

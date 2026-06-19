@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Net;
-using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -18,9 +16,20 @@ using RosMessageTypes.Std;
 ///
 /// URP-compatible: uses RenderPipelineManager.endCameraRendering instead of OnPostRender.
 ///
-/// Port assignment (5000–5500) is managed statically so multiple instances
-/// never collide. Port assignments are published to ROS topic /unity/camera_ports
-/// so ROS nodes know which port to target.
+/// Port assignment is now a STATIC, FIXED mapping for the entire Unity
+/// session: each distinct cameraKey is deterministically assigned one port
+/// out of 5000-5500 the first time ANY CameraStreamer with that key
+/// initializes, and that mapping is never changed, released, or
+/// reassigned -- not on disable, not on destroy, not on re-enable. The same
+/// cameraKey always gets the same port for the lifetime of the session.
+///
+/// This replaces an earlier scheme where ports were dynamically claimed on
+/// enable and released on disable. That approach kept producing collisions
+/// under disable/enable churn (multiple cameras toggling, racing to
+/// re-scan-and-claim from PORT_MIN), because the thing being raced was
+/// reassignment itself. Removing reassignment removes the race: there is
+/// now exactly one allocation event per cameraKey per session, decided once
+/// and left alone.
 /// </summary>
 [RequireComponent(typeof(Camera))]
 public class CameraStreamer : MonoBehaviour
@@ -43,10 +52,10 @@ public class CameraStreamer : MonoBehaviour
     [Range(0.1f, 1f)]
     public float resolutionScale = 1f;
 
-    [Tooltip("Fixed width override (0 = use camera width × resolutionScale).")]
+    [Tooltip("Fixed width override (0 = use camera width x resolutionScale).")]
     public int overrideWidth = 0;
 
-    [Tooltip("Fixed height override (0 = use camera height × resolutionScale).")]
+    [Tooltip("Fixed height override (0 = use camera height x resolutionScale).")]
     public int overrideHeight = 0;
 
     [Header("Compression")]
@@ -65,11 +74,21 @@ public class CameraStreamer : MonoBehaviour
     // Static port manager (shared across all CameraStreamer instances)
     // -------------------------------------------------------------------------
     private static readonly object _portLock = new object();
-    private static readonly HashSet<int> _assignedPorts = new HashSet<int>();
+
+    // Fixed for the entire session: cameraKey -> port. Populated once per
+    // key (the first time a CameraStreamer with that key initializes) and
+    // never removed from, never overwritten, never reassigned -- including
+    // across disable/enable and across destroying and re-instantiating a
+    // GameObject with the same cameraKey (e.g. a scene reload). This is the
+    // single source of truth for "what port does camera X use," for the
+    // entire lifetime of the Unity process.
+    private static readonly Dictionary<string, int> _sessionPortAssignments =
+        new Dictionary<string, int>(StringComparer.Ordinal);
+
     private const int PORT_MIN = 5000;
     private const int PORT_MAX = 5500;
 
-    /// <summary>All live streamers: key → streamer. Used by CameraReceiver for direct lookup.</summary>
+    /// <summary>All live (enabled) streamers: key -> streamer. Used by CameraReceiver for direct lookup.</summary>
     public static readonly Dictionary<string, CameraStreamer> ActiveStreamers =
         new Dictionary<string, CameraStreamer>(StringComparer.Ordinal);
 
@@ -85,18 +104,19 @@ public class CameraStreamer : MonoBehaviour
     private float _frameInterval;
     private float _nextFrameTime;
 
-    // UDP send
-    private UdpClient _udpSender;
-    private string _unityReceiverIP = null;
-    private bool _ipResolved = false;
-
     // Direct-mode subscribers
     private readonly List<CameraReceiver> _directReceivers = new List<CameraReceiver>();
 
-    // URP frame capture gate — set in Update, consumed in endCameraRendering callback
+    // URP frame capture gate -- set in Update, consumed in endCameraRendering callback
     private bool _captureThisFrame = false;
 
     private CancellationTokenSource _cts;
+
+    // True once Start() has run (render texture + ROS singleton exist).
+    // OnEnable can fire before Start on the very first activation, so port
+    // assignment there is deferred until Start finishes; every subsequent
+    // OnEnable (after a disable/re-enable cycle) can assign immediately.
+    private bool _initialized = false;
 
     // -------------------------------------------------------------------------
     // Unity lifecycle
@@ -113,16 +133,15 @@ public class CameraStreamer : MonoBehaviour
         if (_ros == null)
             _ros = ROSConnection.GetOrCreateInstance();
 
-        RegisterStreamer();
         AllocateRenderTexture();
-        AssignPort();
-        SetupROS();
-
-        // Subscribe to /unity/ip so we learn the Unity receiver's IP
-        _ros.Subscribe<StringMsg>("/unity/ip", OnUnityIPReceived);
 
         _frameInterval = 1f / Mathf.Max(1, targetFPS);
         _nextFrameTime = Time.time;
+        _initialized = true;
+
+        // OnEnable ran before Start on first activation; finish the job now
+        // that the render texture and ROS singleton actually exist.
+        AssignPortAndPublish();
     }
 
     void OnEnable()
@@ -130,20 +149,40 @@ public class CameraStreamer : MonoBehaviour
         RegisterStreamer();
         // URP: hook into the render pipeline's post-camera event
         RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
+
+        // Re-enable after a disable: the port NUMBER for this cameraKey was
+        // decided once for the whole session and never changes (see
+        // AssignPort). Re-publishing here just re-announces it on
+        // /unity/camera_ports for any ROS listener that (re)started while
+        // we were disabled. On the very first enable, Start() hasn't run
+        // yet, so this is a no-op here and happens at the end of Start()
+        // instead.
+        if (_initialized)
+            AssignPortAndPublish();
     }
 
     void OnDisable()
     {
         RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
         UnregisterStreamer();
+
+        // Nothing to release here anymore: CameraStreamer doesn't hold a
+        // socket. _sessionPortAssignments[cameraKey] stays exactly as it
+        // is, forever, for the rest of the session, and _assignedPort is
+        // intentionally left as-is (not reset to -1) since it still
+        // correctly reflects this camera's permanent port number even
+        // while disabled.
     }
 
     void OnDestroy()
     {
         _cts.Cancel();
         UnregisterStreamer();
-        ReleasePort(_assignedPort);
-        _udpSender?.Close();
+        // The port number mapping for this cameraKey is permanent for the
+        // session and is NOT released here. If a new CameraStreamer with
+        // the same cameraKey is instantiated later (e.g. scene reload),
+        // AssignPort will find the existing mapping in
+        // _sessionPortAssignments and reuse the same number.
         if (_rt != null) { _rt.Release(); Destroy(_rt); }
         if (_readbackTex != null) Destroy(_readbackTex);
     }
@@ -185,52 +224,82 @@ public class CameraStreamer : MonoBehaviour
         _readbackTex = new Texture2D(w, h, TextureFormat.RGB24, false);
     }
 
+    /// <summary>
+    /// Single entry point for claiming a port and telling ROS about it.
+    /// Called once at the end of Start(), and again every time the
+    /// component is re-enabled after being disabled. Because the port for
+    /// a given cameraKey is fixed for the session (see AssignPort), this is
+    /// safe to call repeatedly -- it will keep resolving to the same port
+    /// number every time, it just needs to (re)open the local socket and
+    /// re-publish to ROS so a newly-(re)started listener picks it up.
+    /// </summary>
+    private void AssignPortAndPublish()
+    {
+        AssignPort();
+        SetupROS();
+    }
+
     private void AssignPort()
     {
         lock (_portLock)
         {
+            // If this cameraKey already has a port from earlier in the
+            // session (this exact instance enabling again, OR a previous
+            // instance with the same key that was destroyed and replaced,
+            // e.g. on a scene reload), reuse that exact number. We NEVER
+            // pick a different port for a key that's already been assigned
+            // one -- that permanence is what makes this safe under
+            // disable/enable churn and concurrent initialization: there is
+            // only ever one allocation decision per key, made once.
+            if (_sessionPortAssignments.TryGetValue(cameraKey, out int existingPort))
+            {
+                _assignedPort = existingPort;
+                Debug.Log($"[CameraStreamer:{cameraKey}] Reusing session port {existingPort}");
+                return;
+            }
+
+            // First time this cameraKey has ever been seen this session.
+            // Pick a free NUMBER and record the mapping permanently. This
+            // does NOT bind any socket -- CameraStreamer never sends or
+            // receives UDP. The port is purely a label published to ROS
+            // (/unity/camera_ports) so that:
+            //   - camera_streamer_node (ROS) knows which port to send its
+            //     UDP frames to, and
+            //   - CameraReceiver (Unity) knows which port to listen on.
+            // Both of those are real socket owners; this class is not.
+            // "Free" here just means not already claimed by another
+            // cameraKey in _sessionPortAssignments -- we deliberately do
+            // NOT try to bind-test it, since binding from here is exactly
+            // what caused CameraReceiver's bind to fail with "address
+            // already in use" (CameraStreamer was squatting on the port it
+            // had no actual need to hold).
             for (int p = PORT_MIN; p <= PORT_MAX; p++)
             {
-                if (_assignedPorts.Contains(p)) continue;
-                if (TryBindPort(p))
-                {
-                    _assignedPort = p;
-                    _assignedPorts.Add(p);
-                    Debug.Log($"[CameraStreamer:{cameraKey}] Assigned UDP port {p}");
-                    return;
-                }
+                if (_sessionPortAssignments.ContainsValue(p)) continue;
+
+                _assignedPort = p;
+                _sessionPortAssignments[cameraKey] = p;
+                Debug.Log($"[CameraStreamer:{cameraKey}] Permanently assigned port number {p} for this session (label only, no socket bound)");
+                return;
             }
-            Debug.LogError($"[CameraStreamer:{cameraKey}] No free UDP port found in {PORT_MIN}-{PORT_MAX}!");
+            Debug.LogError($"[CameraStreamer:{cameraKey}] No free port number found in {PORT_MIN}-{PORT_MAX}!");
         }
-    }
-
-    private bool TryBindPort(int port)
-    {
-        try
-        {
-            var test = new UdpClient(port);
-            test.Close();
-            return true;
-        }
-        catch { return false; }
-    }
-
-    private static void ReleasePort(int port)
-    {
-        if (port < 0) return;
-        lock (_portLock) _assignedPorts.Remove(port);
     }
 
     private void SetupROS()
     {
         if (unityToUnityMode) return;
+        if (_assignedPort < 0) return; // nothing to publish if port assignment failed
 
         if (useCompressedImage)
             _ros.RegisterPublisher<CompressedImageMsg>(rosTopic);
         else
             _ros.RegisterPublisher<ImageMsg>(rosTopic);
 
-        // Publish port assignment for ROS nodes
+        // Publish port assignment for ROS nodes. Latched so a ROS node that
+        // (re)starts after this still picks up the current port immediately,
+        // and re-published on every enable so toggled cameras propagate
+        // their new port to the listening camera_streamer_node.
         _ros.RegisterPublisher<StringMsg>("/unity/camera_ports", latch: true);
         PublishPortAssignment();
     }
@@ -244,17 +313,6 @@ public class CameraStreamer : MonoBehaviour
     // -------------------------------------------------------------------------
     // Runtime callbacks
     // -------------------------------------------------------------------------
-    private void OnUnityIPReceived(StringMsg msg)
-    {
-        _unityReceiverIP = msg.data?.Trim();
-        _ipResolved = !string.IsNullOrEmpty(_unityReceiverIP);
-        if (_ipResolved)
-        {
-            Debug.Log($"[CameraStreamer:{cameraKey}] Unity receiver IP: {_unityReceiverIP}, port: {_assignedPort}");
-            _udpSender?.Close();
-            _udpSender = new UdpClient();
-        }
-    }
 
     /// <summary>Called by CameraReceiver to register for direct (no-UDP) delivery.</summary>
     public void RegisterDirectReceiver(CameraReceiver receiver)
@@ -272,7 +330,7 @@ public class CameraStreamer : MonoBehaviour
     }
 
     // -------------------------------------------------------------------------
-    // Frame throttle — gate whether this frame should be captured.
+    // Frame throttle -- gate whether this frame should be captured.
     // The actual capture happens in OnEndCameraRendering AFTER the GPU is done.
     // -------------------------------------------------------------------------
     void LateUpdate()
@@ -296,13 +354,16 @@ public class CameraStreamer : MonoBehaviour
     }
 
     // -------------------------------------------------------------------------
-    // URP post-render callback — fires after the GPU finishes rendering to _rt.
+    // URP post-render callback -- fires after the GPU finishes rendering to _rt.
     // This is the CORRECT place to ReadPixels; the RT is fully populated here.
     // -------------------------------------------------------------------------
     private void OnEndCameraRendering(ScriptableRenderContext context, Camera cam)
     {
-        // Only process our own camera, and only when throttle says it's time
-        if (cam != _cam || !_captureThisFrame) return;
+        // Only process our own camera, only while we're actually enabled
+        // (this callback is unsubscribed in OnDisable, but guard anyway in
+        // case of any same-frame ordering edge cases), and only when the
+        // throttle says it's time.
+        if (cam != _cam || !enabled || !_captureThisFrame) return;
         _captureThisFrame = false;
 
         CaptureAndSend();
@@ -322,18 +383,11 @@ public class CameraStreamer : MonoBehaviour
 
         byte[] jpeg = _readbackTex.EncodeToJPG(jpegQuality);
 
-        bool hasUDPTarget = _ipResolved && _udpSender != null;
-
-        // Fire-and-forget async UDP send so main thread isn't blocked
-        if (hasUDPTarget)
-        {
-            var ip   = _unityReceiverIP;
-            var port = _assignedPort;
-            var data = jpeg;
-            System.Threading.Tasks.Task.Run(() => SendUDPChunked(data, ip, port), _cts.Token);
-        }
-
-        // ROS publish
+        // Unity -> ROS is topic-only in this architecture. CameraStreamer
+        // never sends UDP; ROS -> Unity is the UDP direction, handled by
+        // camera_streamer_node (ROS) sending to CameraReceiver (Unity),
+        // which is the only thing that should bind a socket on
+        // _assignedPort. Publish to ROS and we're done.
         if (useCompressedImage)
         {
             var msg = new CompressedImageMsg
@@ -346,7 +400,7 @@ public class CameraStreamer : MonoBehaviour
         }
         else
         {
-            // Raw RGB publish — read raw bytes from already-readback texture
+            // Raw RGB publish -- read raw bytes from already-readback texture
             byte[] raw = _readbackTex.GetRawTextureData();
             var msg = new ImageMsg
             {
@@ -358,48 +412,6 @@ public class CameraStreamer : MonoBehaviour
                 data     = raw
             };
             _ros.Publish(rosTopic, msg);
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // UDP chunked send
-    // -------------------------------------------------------------------------
-    // Packet layout (bytes):
-    //   [0..3]  frameId    uint32 — monotonically increasing frame counter
-    //   [4..5]  chunkIdx   uint16 — index of this chunk (0-based)
-    //   [6..7]  chunkTotal uint16 — total chunks for this frame
-    //   [8..]   payload         — JPEG bytes slice
-    // -------------------------------------------------------------------------
-    private const int UDP_PAYLOAD_SIZE = 60000; // stay well under typical MTU
-    private int _frameCounter = 0;
-
-    private void SendUDPChunked(byte[] jpeg, string ip, int port)
-    {
-        try
-        {
-            uint frameId = (uint)Interlocked.Increment(ref _frameCounter);
-            int total    = (jpeg.Length + UDP_PAYLOAD_SIZE - 1) / UDP_PAYLOAD_SIZE;
-            var ep       = new IPEndPoint(IPAddress.Parse(ip), port);
-
-            for (int i = 0; i < total; i++)
-            {
-                int offset = i * UDP_PAYLOAD_SIZE;
-                int len    = Mathf.Min(UDP_PAYLOAD_SIZE, jpeg.Length - offset);
-                byte[] pkt = new byte[8 + len];
-
-                // Header
-                Buffer.BlockCopy(BitConverter.GetBytes(frameId),      0, pkt, 0, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes((ushort)i),    0, pkt, 4, 2);
-                Buffer.BlockCopy(BitConverter.GetBytes((ushort)total), 0, pkt, 6, 2);
-                // Payload
-                Buffer.BlockCopy(jpeg, offset, pkt, 8, len);
-
-                _udpSender.Send(pkt, pkt.Length, ep);
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.LogWarning($"[CameraStreamer:{cameraKey}] UDP send error: {ex.Message}");
         }
     }
 
