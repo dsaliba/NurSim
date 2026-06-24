@@ -5051,6 +5051,37 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   geometryType: 3
+--- !u!1 &321716316
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 321716317}
+  m_Layer: 0
+  m_Name: Calibration Target
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &321716317
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 321716316}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0.2028, y: 0.382, z: 0.2966}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 606230177}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &323357689
 GameObject:
   m_ObjectHideFlags: 0
@@ -11547,6 +11578,7 @@ Transform:
   - {fileID: 1457710912}
   - {fileID: 1897891577}
   - {fileID: 738453888}
+  - {fileID: 321716317}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &620574281
@@ -22270,7 +22302,36 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 1934823942436355915, guid: 33036383184602240b0bbe0e5c621e45, type: 3}
       insertIndex: -1
       addedObject: {fileID: 0}
+    - targetCorrespondingSourceObject: {fileID: 4048495369172425183, guid: 33036383184602240b0bbe0e5c621e45, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 1090787702}
   m_SourcePrefab: {fileID: 100100000, guid: 33036383184602240b0bbe0e5c621e45, type: 3}
+--- !u!4 &1090787700 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: 4089039887801343544, guid: 33036383184602240b0bbe0e5c621e45, type: 3}
+  m_PrefabInstance: {fileID: 1090787699}
+  m_PrefabAsset: {fileID: 0}
+--- !u!1 &1090787701 stripped
+GameObject:
+  m_CorrespondingSourceObject: {fileID: 4048495369172425183, guid: 33036383184602240b0bbe0e5c621e45, type: 3}
+  m_PrefabInstance: {fileID: 1090787699}
+  m_PrefabAsset: {fileID: 0}
+--- !u!114 &1090787702
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1090787701}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 551571dbaa6ac9646a815b104492c543, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  topicName: /calibrate/ovr_location
+  objectToMove: {fileID: 1090787700}
+  targetTransform: {fileID: 321716317}
+  calibrationButtonName: Calibrate Location
 --- !u!1 &1091240372
 GameObject:
   m_ObjectHideFlags: 0
