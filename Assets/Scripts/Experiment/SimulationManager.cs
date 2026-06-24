@@ -5,6 +5,9 @@ using RosMessageTypes.Std;
 using Unity.Robotics.ROSTCPConnector;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 public class SimulationManager : MonoBehaviour
 {
@@ -18,8 +21,8 @@ public class SimulationManager : MonoBehaviour
     [System.Serializable]
     public class MappingFileOption
     {
-        public string displayName;   // Label shown in the dashboard dropdown
-        public string filePath;      // Value published to /mapping_player/file_path
+        public string displayName;
+        public string filePath;
     }
 
     [SerializeField]
@@ -43,6 +46,10 @@ public class SimulationManager : MonoBehaviour
     private bool firstUpdate = true;
     bool lastLatch = false;
 
+    private const string SessionKeyHasPending = "IONA_PendingSceneRestart";
+    private const string SessionKeyEnv = "IONA_PendingEnv";
+    private const string SessionKeyIface = "IONA_PendingIface";
+
     void Start()
     {
         ros = ROSConnection.GetOrCreateInstance();
@@ -54,11 +61,27 @@ public class SimulationManager : MonoBehaviour
 
         if (loadOnStart)
         {
-            // Load environment first; interface loads after so OVRCameraRig
-            // is already present when the interface prefab initialises.
-            StartCoroutine(LoadEnvironmentSceneAsync(0, onDone: () =>
+            int envIndex = 0;
+            int ifaceIndex = 0;
+
+#if UNITY_EDITOR
+            if (SessionState.GetBool(SessionKeyHasPending, false))
             {
-                LoadInterfaceScene(0);
+                SessionState.SetBool(SessionKeyHasPending, false);
+                string pendingEnv = SessionState.GetString(SessionKeyEnv, null);
+                string pendingIface = SessionState.GetString(SessionKeyIface, null);
+
+                int foundEnv = System.Array.IndexOf(environmentSceneNames, pendingEnv);
+                int foundIface = System.Array.IndexOf(interfaces.Select(i => i.name).ToArray(), pendingIface);
+
+                if (foundEnv >= 0) envIndex = foundEnv;
+                if (foundIface >= 0) ifaceIndex = foundIface;
+            }
+#endif
+
+            StartCoroutine(LoadEnvironmentSceneAsync(envIndex, onDone: () =>
+            {
+                LoadInterfaceScene(ifaceIndex);
             }));
         }
 
@@ -74,112 +97,80 @@ public class SimulationManager : MonoBehaviour
         HTTPDash.Instance.RegisterButton("End Task", "End",
             s => ros.Publish("/task/end", new BoolMsg(true)));
 
-        RegisterEnvironmentDashboardControls();
-        RegisterInterfaceDashboardControls();
+        RegisterSceneAndInterfaceDashboardControl();
         RegisterCameraDashboardControls();
         RegisterMappingFileDashboardControls();
     }
 
-    // ── Environment scene reinitialize/load dropdown ───────────────────────
-    private void RegisterEnvironmentDashboardControls()
+    // ── Combined environment + interface load card ─────────────────────
+    private void RegisterSceneAndInterfaceDashboardControl()
     {
-        if (environmentSceneNames == null || environmentSceneNames.Length == 0)
+        if (environmentSceneNames == null || environmentSceneNames.Length == 0 ||
+            interfaces == null || interfaces.Length == 0)
         {
-            Debug.LogWarning("SimulationManager: No environment scene names configured for dashboard.");
-            return;
-        }
-
-        HTTPDash.Instance.RegisterDropdown(
-            "Environment Scene",
-            "Load / Reinitialize",
-            environmentSceneNames,
-            (string selectedSceneName) =>
-            {
-                int index = System.Array.IndexOf(environmentSceneNames, selectedSceneName);
-                if (index < 0)
-                {
-                    Debug.LogWarning($"SimulationManager: Unknown environment scene '{selectedSceneName}' from dashboard.");
-                    return;
-                }
-
-                HTTPDash.Instance.SendNotification("Environment Loading",
-                    $"Reinitializing scene: {selectedSceneName}", "blue");
-
-                StartCoroutine(ReloadEnvironmentSceneAsync(index));
-            });
-    }
-
-    /// <summary>
-    /// Unloads the currently active environment scene (if any) and loads the
-    /// requested one, mirroring ResetEnvironmentCoroutine but for an
-    /// arbitrary target index chosen from the dashboard.
-    /// </summary>
-    private IEnumerator ReloadEnvironmentSceneAsync(int sceneIndex)
-    {
-        if (!string.IsNullOrEmpty(activeEnvironmentName))
-        {
-            if (TaskEnvironment.instances.Count > TaskEnvironment.currentIndex &&
-                TaskEnvironment.currentIndex >= 0)
-            {
-                TaskEnvironment.instances.Remove(
-                    TaskEnvironment.instances[TaskEnvironment.currentIndex]);
-            }
-
-            AsyncOperation unloadOp = SceneManager.UnloadSceneAsync(activeEnvironmentName);
-            if (unloadOp != null)
-                while (!unloadOp.isDone)
-                    yield return null;
-        }
-
-        yield return StartCoroutine(LoadEnvironmentSceneAsync(sceneIndex));
-    }
-
-    // ── Interface reinitialize/load dropdown ────────────────────────────────
-    private void RegisterInterfaceDashboardControls()
-    {
-        if (interfaces == null || interfaces.Length == 0)
-        {
-            Debug.LogWarning("SimulationManager: No interfaces configured for dashboard.");
+            Debug.LogWarning("SimulationManager: Need at least one environment and one interface configured for dashboard.");
             return;
         }
 
         string[] interfaceNames = interfaces.Select(i => i.name).ToArray();
 
-        HTTPDash.Instance.RegisterDropdown(
-            "Interface",
-            "Load / Reinitialize",
-            interfaceNames,
-            (string selectedInterfaceName) =>
+        var fields = new List<HTTPDash.MultiFieldCard.MultiField>
+        {
+            HTTPDash.MultiFieldCard.MultiField.Dropdown("environment", "Environment", environmentSceneNames),
+            HTTPDash.MultiFieldCard.MultiField.Dropdown("interface", "Interface", interfaceNames)
+        };
+
+        HTTPDash.Instance.RegisterMultiField(
+            "Scene Setup",
+            "Load",
+            fields,
+            values =>
             {
-                int index = System.Array.IndexOf(interfaceNames, selectedInterfaceName);
-                if (index < 0)
+                string envName = values.TryGetValue("environment", out var e) ? e : null;
+                string ifaceName = values.TryGetValue("interface", out var i) ? i : null;
+
+                if (string.IsNullOrEmpty(envName) || string.IsNullOrEmpty(ifaceName))
                 {
-                    Debug.LogWarning($"SimulationManager: Unknown interface '{selectedInterfaceName}' from dashboard.");
+                    Debug.LogWarning("SimulationManager: Missing environment/interface selection from dashboard.");
                     return;
                 }
 
-                HTTPDash.Instance.SendNotification("Interface Loading",
-                    $"Reinitializing interface: {selectedInterfaceName}", "blue");
-
-                ReloadInterfaceScene(index);
+#if UNITY_EDITOR
+                HTTPDash.Instance.SendNotification("Restarting",
+                    $"Restarting Play Mode with {envName} / {ifaceName}", "blue");
+                RequestEditorRestartWithSelection(envName, ifaceName);
+#else
+                HTTPDash.Instance.SendNotification("Reloading",
+                    $"Reloading in place (no editor restart in builds): {envName} / {ifaceName}", "blue");
+                int envIdx = System.Array.IndexOf(environmentSceneNames, envName);
+                int ifaceIdx = System.Array.IndexOf(interfaceNames, ifaceName);
+                if (envIdx >= 0) StartCoroutine(ReloadEnvironmentSceneAsync(envIdx));
+                if (ifaceIdx >= 0) ReloadInterfaceScene(ifaceIdx);
+#endif
             });
     }
 
-    /// <summary>
-    /// Destroys the currently active interface prefab instance (if any) and
-    /// instantiates the requested one in its place.
-    /// </summary>
-    private void ReloadInterfaceScene(int sceneIndex)
+#if UNITY_EDITOR
+    private static void RequestEditorRestartWithSelection(string envName, string ifaceName)
     {
-        if (activeInterface != null)
-        {
-            Destroy(activeInterface);
-        }
+        SessionState.SetString(SessionKeyEnv, envName);
+        SessionState.SetString(SessionKeyIface, ifaceName);
+        SessionState.SetBool(SessionKeyHasPending, true);
 
-        LoadInterfaceScene(sceneIndex);
+        EditorApplication.playModeStateChanged -= OnPlayModeStateChangedForRestart;
+        EditorApplication.playModeStateChanged += OnPlayModeStateChangedForRestart;
+        EditorApplication.isPlaying = false;
     }
 
-    // ── Camera selection dropdown ────────────────────────────────────────
+    private static void OnPlayModeStateChangedForRestart(PlayModeStateChange state)
+    {
+        if (state != PlayModeStateChange.EnteredEditMode) return;
+        EditorApplication.playModeStateChanged -= OnPlayModeStateChangedForRestart;
+        EditorApplication.isPlaying = true;
+    }
+#endif
+
+    // ── Camera selection dropdown (unchanged) ───────────────────────────
     private void RegisterCameraDashboardControls()
     {
         if (cameraOptions == null || cameraOptions.Length == 0)
@@ -200,7 +191,7 @@ public class SimulationManager : MonoBehaviour
             });
     }
 
-    // ── Mapping file toggle dropdown ────────────────────────────────────────
+    // ── Mapping file toggle dropdown (unchanged) ────────────────────────
     private void RegisterMappingFileDashboardControls()
     {
         if (mappingFileOptions == null || mappingFileOptions.Count == 0)
@@ -232,10 +223,8 @@ public class SimulationManager : MonoBehaviour
             });
     }
 
-    public void ResetCurrentEnvironment()
-    {
-        StartCoroutine(ResetEnvironmentCoroutine());
-    }
+    // ── Everything below is unchanged from your original file ──────────
+    public void ResetCurrentEnvironment() => StartCoroutine(ResetEnvironmentCoroutine());
 
     private IEnumerator ResetEnvironmentCoroutine()
     {
@@ -250,30 +239,48 @@ public class SimulationManager : MonoBehaviour
         yield return StartCoroutine(LoadEnvironmentSceneAsync(0));
     }
 
+    private IEnumerator ReloadEnvironmentSceneAsync(int sceneIndex)
+    {
+        if (!string.IsNullOrEmpty(activeEnvironmentName))
+        {
+            if (TaskEnvironment.instances.Count > TaskEnvironment.currentIndex &&
+                TaskEnvironment.currentIndex >= 0)
+            {
+                TaskEnvironment.instances.Remove(
+                    TaskEnvironment.instances[TaskEnvironment.currentIndex]);
+            }
+
+            AsyncOperation unloadOp = SceneManager.UnloadSceneAsync(activeEnvironmentName);
+            if (unloadOp != null)
+                while (!unloadOp.isDone)
+                    yield return null;
+        }
+
+        yield return StartCoroutine(LoadEnvironmentSceneAsync(sceneIndex));
+    }
+
+    private void ReloadInterfaceScene(int sceneIndex)
+    {
+        if (activeInterface != null)
+            Destroy(activeInterface);
+
+        LoadInterfaceScene(sceneIndex);
+    }
+
     public void LoadInterfaceScene(int sceneIndex)
     {
         activeInterfaceName = interfaces[sceneIndex].name;
         activeInterface = Instantiate(interfaces[sceneIndex].prefab,
                                       new Vector3(0, 100, 0), Quaternion.identity);
-
-        // Keep the interface prefab alive across scene reloads.
         DontDestroyOnLoad(activeInterface);
     }
 
-    /// <summary>
-    /// Loads the environment scene additively, then sets it as the active scene
-    /// so that OVRCameraRig / XR tracking binds to it correctly.
-    /// </summary>
-    public void LoadEnvironmentScene(int sceneIndex)
-    {
-        StartCoroutine(LoadEnvironmentSceneAsync(sceneIndex));
-    }
+    public void LoadEnvironmentScene(int sceneIndex) => StartCoroutine(LoadEnvironmentSceneAsync(sceneIndex));
 
     private IEnumerator LoadEnvironmentSceneAsync(int sceneIndex, System.Action onDone = null)
     {
         activeEnvironmentName = environmentSceneNames[sceneIndex];
 
-        // Track which TaskEnvironment instance this maps to.
         for (int i = 0; i < TaskEnvironment.instances.Count; i++)
         {
             if (activeEnvironmentName.Equals(TaskEnvironment.instances[i].sceneName))
@@ -283,7 +290,6 @@ public class SimulationManager : MonoBehaviour
             }
         }
 
-        // Load additively and wait for completion before setting active scene.
         AsyncOperation loadOp = SceneManager.LoadSceneAsync(
             activeEnvironmentName, LoadSceneMode.Additive);
         loadOp.allowSceneActivation = true;
@@ -291,15 +297,9 @@ public class SimulationManager : MonoBehaviour
         while (!loadOp.isDone)
             yield return null;
 
-        // ── KEY FIX ──────────────────────────────────────────────────────────
-        // Set the lab scene as the active scene. This ensures:
-        //   1. OVRManager (on OVRCameraRig) is in the active scene, so the
-        //      XR runtime binds head tracking and stereo rendering to it.
-        //   2. New GameObjects spawned at runtime are created in this scene.
         Scene labScene = SceneManager.GetSceneByName(activeEnvironmentName);
         if (labScene.IsValid())
             SceneManager.SetActiveScene(labScene);
-        // ─────────────────────────────────────────────────────────────────────
 
         HTTPDash.Instance.SendNotification("Scene Loaded",
             "Loaded scene: " + activeEnvironmentName, "blue");

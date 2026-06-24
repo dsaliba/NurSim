@@ -253,6 +253,7 @@ GameObject:
   - component: {fileID: 791946143}
   - component: {fileID: 791946146}
   - component: {fileID: 791946145}
+  - component: {fileID: 791946147}
   m_Layer: 0
   m_Name: Simulation Manager
   m_TagString: Untagged
@@ -296,9 +297,6 @@ MonoBehaviour:
   - displayName: Pose
     filePath: /catkin_ws/pose_mapping.json
   loadOnStart: 1
-  enableFullResetButton: 1
-  fullResetButtonLabel: Full Restart
-  bootstrapSceneName: Bootstrap
 --- !u!4 &791946144
 Transform:
   m_ObjectHideFlags: 0
@@ -339,6 +337,21 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   localIP: 130.215.183.99
+--- !u!114 &791946147
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 791946142}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 35b960fb01b66b84892f1e10c9cb0776, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  cmdTopic: /recording/cmd
+  topicsTopic: /recording/topics
+  statusTopic: /recording/status
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

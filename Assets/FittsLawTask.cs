@@ -3,13 +3,9 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
-
-// ROS-TCP-Connector imports — only compiled when the package is present
-#if ROS_TCP_CONNECTOR
 using Unity.Robotics.ROSTCPConnector;
 using RosMessageTypes.Std;
 using RosMessageTypes.Geometry;
-#endif
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -34,11 +30,28 @@ using UnityEditor;
 ///
 /// • Optionally shows a floating dot above the active target.
 ///
-/// • Publishes live data to ROS via ROS-TCP-Connector:
-///     /fitts/layout_stats   (std_msgs/String — JSON, published once on start/restart)
-///     /fitts/active_target  (std_msgs/String — "T3" etc., every target change)
-///     /fitts/movement       (std_msgs/String — JSON per completed movement)
-///     /fitts/task_complete  (std_msgs/String — final JSON summary)
+/// • Publishes live data to ROS via ROS-TCP-Connector as hierarchical,
+///   primitive-typed topics (no JSON) so rosbag/rqt_plot/CSV export work
+///   without any parsing on the consumer side:
+///     /fitts/layout_stats/*    — Int32 / Float32 / Int32MultiArray, latched,
+///                                 published exactly once per run, at the
+///                                 moment the pointer first settles on T1
+///                                 (this is the task's canonical t=0 — NOT
+///                                 at ResetTask/Activate time).
+///     /fitts/active_target/*   — Int32, latched. Published at task start
+///                                 (already describing T2) and after every
+///                                 completed movement. At task end, label
+///                                 and visit_step are explicitly set to -1
+///                                 as a terminal sentinel so the last real
+///                                 target's value doesn't appear to persist
+///                                 forever when inspecting/replaying the bag.
+///     /fitts/movement/*        — Int32 / Float32 / geometry_msgs/Point,
+///                                 one synchronized burst per completed
+///                                 movement (T1→T2, T2→T3, ...).
+///     /fitts/task_complete/*   — Int32 / Float32, final run summary,
+///                                 published exactly once at the end.
+///   See fitts_ros_data_format.md for the full topic/field reference and
+///   guidance on reconstructing per-trial tables from recorded bags.
 ///
 /// • Scene-manager integration (managedBySceneManager = true):
 ///     - GameObject starts disabled at runtime.
@@ -47,7 +60,7 @@ using UnityEditor;
 ///     - Wire this into SequentialGoalTrial exactly like any other TrialGoal.
 ///
 /// Dependencies:
-///   • Unity ROS-TCP-Connector package  →  define ROS_TCP_CONNECTOR in Project Settings
+///   • Unity ROS-TCP-Connector package  (assumed always present — no compile guard)
 ///   • Oculus Integration SDK           →  define USING_OVR_PLUGIN
 /// </summary>
 [ExecuteAlways]
@@ -129,10 +142,10 @@ public class FittsLawTask : Goal
     public float hapticDuration = 0.12f;
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  ROS topics
+    //  ROS topics  (each is a BASE path; actual leaves are "{base}/{field}")
     // ─────────────────────────────────────────────────────────────────────────
 
-    [Header("ROS Publishing  (requires ROS_TCP_CONNECTOR define)")]
+    [Header("ROS Publishing  (hierarchical primitive topics, no JSON)")]
     public string rosTopicLayoutStats  = "/fitts/layout_stats";
     public string rosTopicActiveTarget = "/fitts/active_target";
     public string rosTopicMovement     = "/fitts/movement";
@@ -215,9 +228,7 @@ public class FittsLawTask : Goal
     // Haptic stop time — avoids coroutine/OVR race condition
     private float _hapticStopTime = -1f;
 
-#if ROS_TCP_CONNECTOR
     private ROSConnection _ros;
-#endif
 
     // ── Per-movement data ────────────────────────────────────────────────────
     private struct MovementRecord
@@ -266,6 +277,13 @@ public class FittsLawTask : Goal
     private void Start()
     {
         if (!Application.isPlaying) return;
+
+        if (RecordingManager.Instance != null)
+        {
+            RecordingManager.Instance.SetExperimentName("fitts");
+            RecordingManager.Instance.RegisterCondition("camera", "Camera", new[] { "Front", "Back", "Side" });
+            RecordingManager.Instance.RegisterCondition("interface", "Interface", new[] { "hand", "joystick", "pose" });
+        }
 
         RebuildLayout();
         BakeAllTextures();
@@ -372,8 +390,12 @@ public class FittsLawTask : Goal
         _records.Clear();
         StartNewMovement();
         ApplyTextureForStep(0);
-        ROSPublishLayoutStats();
-        ROSPublishActiveTarget();
+        // layout_stats and the first active_target publish are intentionally
+        // deferred until the pointer actually settles on T1 (see RegisterHit).
+        // That moment is the real start of the task — publishing the static
+        // header info there guarantees any recording that begins up to that
+        // point still captures it. Latching (see InitROS) covers recordings
+        // that start even later than that.
     }
 
     private void StartNewMovement()
@@ -394,6 +416,11 @@ public class FittsLawTask : Goal
         {
             _waitingForStart        = false;
             _waitingForStartDisplay = false;
+
+            // Canonical t=0 for the task: publish the static layout header
+            // exactly when the pointer settles on T1, not at ResetTask.
+            ROSPublishLayoutStats();
+
             TriggerHaptics();
 
             _visitStep++;
@@ -402,6 +429,7 @@ public class FittsLawTask : Goal
                 _taskComplete = true;
                 ApplyTextureForStep(_visitStep);
                 UpdateDotIndicator();
+                ROSPublishActiveTargetCleared();
                 ROSPublishTaskComplete();
                 onComplete?.Invoke();
                 return;
@@ -455,6 +483,7 @@ public class FittsLawTask : Goal
             PrintReport();
             ApplyTextureForStep(_visitStep);
             UpdateDotIndicator();
+            ROSPublishActiveTargetCleared();
             ROSPublishTaskComplete();
             onComplete?.Invoke();
             return;
@@ -576,84 +605,137 @@ public class FittsLawTask : Goal
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  ROS publishing
+    //  ROS publishing  (hierarchical primitive topics — no JSON)
     // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Builds a leaf topic path from a configurable base + field name.</summary>
+    private static string T(string baseTopic, string suffix) => baseTopic.TrimEnd('/') + "/" + suffix;
 
     private void InitROS()
     {
-#if ROS_TCP_CONNECTOR
         _ros = ROSConnection.GetOrCreateInstance();
-        _ros.RegisterPublisher<StringMsg>(rosTopicLayoutStats);
-        _ros.RegisterPublisher<StringMsg>(rosTopicActiveTarget);
-        _ros.RegisterPublisher<StringMsg>(rosTopicMovement);
-        _ros.RegisterPublisher<StringMsg>(rosTopicTaskComplete);
-#endif
-    }
 
-    private void ROSPublish(string topic, string json)
-    {
-#if ROS_TCP_CONNECTOR
-        if (_ros == null) return;
-        _ros.Publish(topic, new StringMsg { data = json });
-#endif
+        // Latched: layout_stats and active_target represent "the current
+        // state of the run" rather than discrete events, so a subscriber
+        // (including rosbag record) that connects late still immediately
+        // receives the last published value.
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicLayoutStats, "num_targets"), latch: true);
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicLayoutStats, "target_width_px"), latch: true);
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicLayoutStats, "radius_px"), latch: true);
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicLayoutStats, "layout_diameter_px"), latch: true);
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicLayoutStats, "amplitude_px"), latch: true);
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicLayoutStats, "fitts_id"), latch: true);
+        _ros.RegisterPublisher<Int32MultiArrayMsg>(T(rosTopicLayoutStats, "visit_sequence"), latch: true);
+
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicActiveTarget, "label"), latch: true);
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicActiveTarget, "visit_step"), latch: true);
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicActiveTarget, "total_steps"), latch: true);
+
+        // Not latched: these are discrete per-event streams, not "current state".
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "index"));
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "from_label"));
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "to_label"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicMovement, "duration_seconds"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicMovement, "amplitude_px"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicMovement, "amplitude_3d"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicMovement, "fitts_id"));
+        _ros.RegisterPublisher<PointMsg>(T(rosTopicMovement, "settle_position_3d"));
+        _ros.RegisterPublisher<PointMsg>(T(rosTopicMovement, "settle_position_plane"));
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "trajectory_samples"));
+
+        _ros.RegisterPublisher<Int32Msg>(T(rosTopicTaskComplete, "total_movements"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "total_time_seconds"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "mean_movement_time_seconds"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "mean_amplitude_px"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "mean_fitts_id"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "throughput_bps"));
+        _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "layout_fitts_id"));
     }
 
     private void ROSPublishLayoutStats()
     {
+        if (_ros == null) return;
+
         int   half    = numTargets / 2;
         float theta   = 2f * Mathf.PI * half / numTargets;
         float chordPx = 2f * radiusPx * Mathf.Sin(theta * 0.5f);
 
-        // Build human-readable visit sequence as T-labels: e.g. "T1,T2,T3,..."
-        string visitSeqLabels = (_slotLabel != null)
-            ? string.Join(",", System.Array.ConvertAll(_visitOrder, s => $"T{_slotLabel[s]}"))
-            : string.Join(",", _visitOrder);
+        // 1-indexed T-labels in visit order, e.g. [1,5,2,6,3,7,4,8,9]
+        int[] visitLabels = (_slotLabel != null && _visitOrder != null)
+            ? Array.ConvertAll(_visitOrder, s => _slotLabel[s])
+            : (_visitOrder ?? Array.Empty<int>());
 
-        string json =
-            $"{{" +
-            $"\"numTargets\":{numTargets}," +
-            $"\"targetWidthPx\":{targetWidthPx:F2}," +
-            $"\"radiusPx\":{radiusPx:F2}," +
-            $"\"layoutDiameterPx\":{radiusPx * 2f:F2}," +
-            $"\"amplitudePx\":{chordPx:F2}," +
-            $"\"fittsID\":{_fittsID:F4}," +
-            $"\"visitSequence\":[{visitSeqLabels}]" +
-            $"}}";
+        _ros.Publish(T(rosTopicLayoutStats, "num_targets"), new Int32Msg { data = numTargets });
+        _ros.Publish(T(rosTopicLayoutStats, "target_width_px"), new Float32Msg { data = targetWidthPx });
+        _ros.Publish(T(rosTopicLayoutStats, "radius_px"), new Float32Msg { data = radiusPx });
+        _ros.Publish(T(rosTopicLayoutStats, "layout_diameter_px"), new Float32Msg { data = radiusPx * 2f });
+        _ros.Publish(T(rosTopicLayoutStats, "amplitude_px"), new Float32Msg { data = chordPx });
+        _ros.Publish(T(rosTopicLayoutStats, "fitts_id"), new Float32Msg { data = _fittsID });
+        _ros.Publish(T(rosTopicLayoutStats, "visit_sequence"), new Int32MultiArrayMsg { data = visitLabels });
 
-        ROSPublish(rosTopicLayoutStats, json);
-        Debug.Log($"[FittsLawTask] Layout stats → {rosTopicLayoutStats}\n{json}");
+        Debug.Log($"[FittsLawTask] Layout stats published under {rosTopicLayoutStats}/* (task start / T1 settled)");
     }
 
     private void ROSPublishActiveTarget()
     {
+        if (_ros == null) return;
         if (_taskComplete || _visitOrder == null || _slotLabel == null) return;
-        int    activeSlot  = _visitOrder[_visitStep];
-        string labelStr    = $"T{_slotLabel[activeSlot]}";
-        ROSPublish(rosTopicActiveTarget,
-            $"{{\"activeTarget\":\"{labelStr}\",\"visitStep\":{_visitStep + 1},\"totalSteps\":{_visitOrder.Length}}}");
+
+        int activeSlot = _visitOrder[_visitStep];
+        int label      = _slotLabel[activeSlot];
+
+        _ros.Publish(T(rosTopicActiveTarget, "label"), new Int32Msg { data = label });
+        _ros.Publish(T(rosTopicActiveTarget, "visit_step"), new Int32Msg { data = _visitStep + 1 });
+        _ros.Publish(T(rosTopicActiveTarget, "total_steps"), new Int32Msg { data = _visitOrder.Length });
+    }
+
+    /// <summary>
+    /// Publishes the terminal sentinel for the active-target stream: label = -1
+    /// signals unambiguously that no target is active any more, so the last
+    /// real target's value doesn't appear to "hold forever" when inspecting
+    /// or replaying the bag. visit_step is cleared the same way; total_steps
+    /// is left untouched since it's static layout info, not a moving value.
+    /// </summary>
+    private void ROSPublishActiveTargetCleared()
+    {
+        if (_ros == null) return;
+        _ros.Publish(T(rosTopicActiveTarget, "label"), new Int32Msg { data = -1 });
+        _ros.Publish(T(rosTopicActiveTarget, "visit_step"), new Int32Msg { data = -1 });
     }
 
     private void ROSPublishMovement(MovementRecord r)
     {
-        string json =
-            $"{{" +
-            $"\"movementIndex\":{_movementsCompleted}," +
-            $"\"from\":\"T{r.fromLabel}\"," +
-            $"\"to\":\"T{r.toLabel}\"," +
-            $"\"durationSeconds\":{r.durationSeconds:F4}," +
-            $"\"amplitudePx\":{r.amplitudePx:F2}," +
-            $"\"amplitude3D\":{r.amplitude3D:F5}," +
-            $"\"fittsID\":{r.fittsID:F4}," +
-            $"\"settlePos3D\":[{r.settlePosition3D.x:F5},{r.settlePosition3D.y:F5},{r.settlePosition3D.z:F5}]," +
-            $"\"settlePosPlane\":[{r.settlePositionPlane.x:F5},{r.settlePositionPlane.y:F5}]," +
-            $"\"trajectorySamples\":{r.trajectory3D.Count}" +
-            $"}}";
+        if (_ros == null) return;
 
-        ROSPublish(rosTopicMovement, json);
+        _ros.Publish(T(rosTopicMovement, "index"), new Int32Msg { data = _movementsCompleted });
+        _ros.Publish(T(rosTopicMovement, "from_label"), new Int32Msg { data = r.fromLabel });
+        _ros.Publish(T(rosTopicMovement, "to_label"), new Int32Msg { data = r.toLabel });
+        _ros.Publish(T(rosTopicMovement, "duration_seconds"), new Float32Msg { data = r.durationSeconds });
+        _ros.Publish(T(rosTopicMovement, "amplitude_px"), new Float32Msg { data = r.amplitudePx });
+        _ros.Publish(T(rosTopicMovement, "amplitude_3d"), new Float32Msg { data = r.amplitude3D });
+        _ros.Publish(T(rosTopicMovement, "fitts_id"), new Float32Msg { data = r.fittsID });
+
+        _ros.Publish(T(rosTopicMovement, "settle_position_3d"), new PointMsg
+        {
+            x = r.settlePosition3D.x,
+            y = r.settlePosition3D.y,
+            z = r.settlePosition3D.z
+        });
+
+        _ros.Publish(T(rosTopicMovement, "settle_position_plane"), new PointMsg
+        {
+            x = r.settlePositionPlane.x,
+            y = r.settlePositionPlane.y,
+            z = 0.0
+        });
+
+        _ros.Publish(T(rosTopicMovement, "trajectory_samples"), new Int32Msg { data = r.trajectory3D.Count });
     }
 
     private void ROSPublishTaskComplete()
     {
+        if (_ros == null) return;
+
         double totalTime  = 0;
         double totalAmpPx = 0;
         double totalID    = 0;
@@ -678,22 +760,15 @@ public class FittsLawTask : Goal
         }
         double throughput = tpCount > 0 ? tp / tpCount : 0;
 
-        string json =
-            $"{{" +
-            $"\"numTargets\":{numTargets}," +
-            $"\"targetWidthPx\":{targetWidthPx:F2}," +
-            $"\"radiusPx\":{radiusPx:F2}," +
-            $"\"layoutFittsID\":{_fittsID:F4}," +
-            $"\"totalMovements\":{_records.Count}," +
-            $"\"totalTimeSeconds\":{totalTime:F4}," +
-            $"\"meanMovementTimeSeconds\":{meanMT:F4}," +
-            $"\"meanAmplitudePx\":{meanAmp:F2}," +
-            $"\"meanFittsID\":{meanID:F4}," +
-            $"\"throughputBitsPerSecond\":{throughput:F4}" +
-            $"}}";
+        _ros.Publish(T(rosTopicTaskComplete, "total_movements"), new Int32Msg { data = _records.Count });
+        _ros.Publish(T(rosTopicTaskComplete, "total_time_seconds"), new Float32Msg { data = (float)totalTime });
+        _ros.Publish(T(rosTopicTaskComplete, "mean_movement_time_seconds"), new Float32Msg { data = (float)meanMT });
+        _ros.Publish(T(rosTopicTaskComplete, "mean_amplitude_px"), new Float32Msg { data = (float)meanAmp });
+        _ros.Publish(T(rosTopicTaskComplete, "mean_fitts_id"), new Float32Msg { data = (float)meanID });
+        _ros.Publish(T(rosTopicTaskComplete, "throughput_bps"), new Float32Msg { data = (float)throughput });
+        _ros.Publish(T(rosTopicTaskComplete, "layout_fitts_id"), new Float32Msg { data = _fittsID });
 
-        ROSPublish(rosTopicTaskComplete, json);
-        Debug.Log($"[FittsLawTask] Task complete → {rosTopicTaskComplete}\n{json}");
+        Debug.Log($"[FittsLawTask] Task complete published under {rosTopicTaskComplete}/*");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -715,10 +790,6 @@ public class FittsLawTask : Goal
             dev.SendHapticImpulse(0, hapticAmplitude, hapticDuration);
 #endif
     }
-
-#if USING_OVR_PLUGIN
-    // Coroutine no longer used — haptic stop handled in Update via _hapticStopTime
-#endif
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Dot indicator
