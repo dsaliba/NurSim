@@ -1,8 +1,12 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.XR;
+using UnityEngine.XR.OpenXR.Input;
 using Unity.Robotics.ROSTCPConnector;
 using RosMessageTypes.Std;
 using RosMessageTypes.Geometry;
@@ -26,7 +30,10 @@ using UnityEditor;
 /// • Extends Goal: CheckIfObjectReachedGoal() returns true once the
 ///   entire sequence is complete.
 ///
-/// • Vibrates the Oculus right-hand controller on each successful hit.
+/// • Vibrates the right-hand XR controller on each successful hit, using
+///   OpenXR's action-based haptics API first (required for HTC Vive OpenXR
+///   controller profiles — see the Haptics region below for why), with two
+///   fallback paths for other hardware/backends.
 ///
 /// • Optionally shows a floating dot above the active target.
 ///
@@ -60,8 +67,23 @@ using UnityEditor;
 ///     - Wire this into SequentialGoalTrial exactly like any other TrialGoal.
 ///
 /// Dependencies:
-///   • Unity ROS-TCP-Connector package  (assumed always present — no compile guard)
-///   • Oculus Integration SDK           →  define USING_OVR_PLUGIN
+///   • Unity ROS-TCP-Connector package          (assumed always present — no compile guard)
+///   • Unity Input System package                (required by OpenXR Plugin anyway)
+///   • Unity OpenXR Plugin (com.unity.xr.openxr)  (for action-based haptics)
+///   • HTC Vive OpenXR feature group              (or any other OpenXR runtime/controller)
+///
+/// IMPORTANT PROJECT-SETTINGS CHECKLIST if haptics still don't buzz:
+///   1. Project Settings → Player → Active Input Handling must include the
+///      new Input System ("Input System Package (New)" or "Both"). The
+///      OpenXR action-based haptics path depends on it.
+///   2. Project Settings → XR Plug-in Management → OpenXR → make sure the
+///      correct Vive controller interaction profile feature is enabled for
+///      your actual hardware (e.g. the Vive Controller / Focus 3 / Cosmos
+///      profile under the Vive OpenXR feature group). If no interaction
+///      profile is enabled, the controller won't bind at all — buttons,
+///      tracking, AND haptics will all silently fail to resolve.
+///   3. Confirm OpenXR is the active provider for your build target under
+///      XR Plug-in Management (not just installed in the package list).
 /// </summary>
 [ExecuteAlways]
 [RequireComponent(typeof(MeshRenderer))]
@@ -134,12 +156,16 @@ public class FittsLawTask : Goal
     //  Haptics
     // ─────────────────────────────────────────────────────────────────────────
 
-    [Header("Haptics  (Oculus right hand)")]
+    [Header("Haptics  (right-hand XR controller — Vive OpenXR / any OpenXR runtime)")]
     [Range(0f, 1f)]
     public float hapticAmplitude = 0.6f;
 
     [Min(0f)]
     public float hapticDuration = 0.12f;
+
+    [Tooltip("Which hand's controller should vibrate on a hit.")]
+    public UnityEngine.XR.InputDeviceCharacteristics hapticHandCharacteristic =
+        UnityEngine.XR.InputDeviceCharacteristics.Right;
 
     // ─────────────────────────────────────────────────────────────────────────
     //  ROS topics  (each is a BASE path; actual leaves are "{base}/{field}")
@@ -225,7 +251,7 @@ public class FittsLawTask : Goal
     // When populated, runtime skips generation entirely.
     [SerializeField] public Texture2D[] _prebakedTextures;
 
-    // Haptic stop time — avoids coroutine/OVR race condition
+    // Haptic stop time — avoids coroutine race condition
     private float _hapticStopTime = -1f;
 
     private ROSConnection _ros;
@@ -289,6 +315,7 @@ public class FittsLawTask : Goal
         BakeAllTextures();
         InitROS();
         EnsureDotIndicator();
+        InitHapticAction();
 
         if (!managedBySceneManager)
             ResetTask();
@@ -299,12 +326,13 @@ public class FittsLawTask : Goal
         if (!Application.isPlaying) return;
 
         // ── Haptic stop timer ────────────────────────────────────────────────
+        // Explicit stop rather than relying solely on the runtime's internal
+        // duration timeout — some OpenXR runtimes are inconsistent about
+        // auto-stopping a haptic impulse after the requested duration.
         if (_hapticStopTime > 0f && Time.time >= _hapticStopTime)
         {
             _hapticStopTime = -1f;
-#if USING_OVR_PLUGIN
-            OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.RTouch);
-#endif
+            StopHaptics();
         }
 
         if (_taskComplete) return;
@@ -356,6 +384,8 @@ public class FittsLawTask : Goal
 
     private void OnDestroy()
     {
+        StopHaptics();
+        DisposeHapticAction();
         DestroyCachedTextures();
         DestroyGeneratedTexture();
         if (_dotIndicator != null)
@@ -772,23 +802,182 @@ public class FittsLawTask : Goal
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Haptics
+    //  Haptics  (OpenXR action-based — required for Vive OpenXR controllers)
     // ─────────────────────────────────────────────────────────────────────────
+    //
+    // WHY THE OLD APPROACH DIDN'T WORK:
+    // UnityEngine.XR.InputDevice.SendHapticImpulse() (the "legacy XR Input"
+    // device-based path) routes through each runtime's implicit default
+    // haptic binding. HTC's Vive OpenXR feature group ships its own
+    // controller interaction profiles (Vive Controller / Focus 3 / Cosmos,
+    // etc.) rather than the generic Khronos Simple Controller profile, and
+    // those Vive-specific profiles frequently don't surface a haptic output
+    // through that implicit binding — TryGetHapticCapabilities() on the
+    // device reports supportsImpulse = false even though the hardware can
+    // physically buzz.
+    //
+    // THE FIX:
+    // Unity's OpenXR Plugin's *action-based* haptics API
+    // (UnityEngine.XR.OpenXR.Input.OpenXRInput.SendHapticImpulse) instead
+    // routes through an explicit Input System binding path
+    // ("<XRController>{RightHand}/haptic"), which Vive's interaction
+    // profiles DO support — this is also what Unity's own OpenXR sample
+    // project uses for haptics, independent of headset vendor. The
+    // InputAction is built in code below, so no manual Input Action Asset
+    // wiring is required in the Inspector.
+    //
+    // Two extra fallbacks are layered underneath in case this script is
+    // ever run on a different XR backend:
+    //   1) OpenXR action-based haptics            (primary — fixes Vive)
+    //   2) Input System XRControllerWithRumble    (covers some non-OpenXR
+    //                                                Input-System-exposed
+    //                                                controllers)
+    //   3) Legacy XR.InputDevice haptics           (last resort)
+
+    private InputAction _hapticAction;
+    private bool        _hapticActionInitialized = false;
+
+    // Cached legacy-path device (fallback #3 only).
+    private UnityEngine.XR.InputDevice _legacyHapticDevice;
+    private bool _legacyHapticDeviceCached = false;
+
+    private void InitHapticAction()
+    {
+        if (_hapticActionInitialized) return;
+        _hapticActionInitialized = true;
+
+        bool isLeft = hapticHandCharacteristic.HasFlag(UnityEngine.XR.InputDeviceCharacteristics.Left);
+        string hand = isLeft ? "LeftHand" : "RightHand";
+
+        try
+        {
+            _hapticAction = new InputAction(
+                name: "FittsLawHaptic",
+                type: InputActionType.Value,
+                binding: $"<XRController>{{{hand}}}/haptic");
+            _hapticAction.Enable();
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[FittsLawTask] Could not create OpenXR haptic action " +
+                              $"(OpenXR Plugin / Input System may not be set up): {e.Message}");
+            _hapticAction = null;
+        }
+    }
+
+    private void DisposeHapticAction()
+    {
+        if (_hapticAction == null) return;
+        _hapticAction.Disable();
+        _hapticAction.Dispose();
+        _hapticAction = null;
+    }
 
     private void TriggerHaptics()
     {
-        _hapticStopTime = Time.time + hapticDuration;
-#if USING_OVR_PLUGIN
-        OVRInput.SetControllerVibration(hapticAmplitude, hapticAmplitude, OVRInput.Controller.RTouch);
-#else
+        bool sent = TryOpenXRHaptics();
+
+        if (!sent)
+            sent = TryInputSystemRumble();
+
+        if (!sent)
+            sent = TryLegacyXRHaptics();
+
+        _hapticStopTime = sent ? Time.time + hapticDuration : -1f;
+
+        if (!sent)
+            Debug.LogWarning("[FittsLawTask] No haptic-capable controller found via OpenXR, " +
+                              "Input System rumble, or legacy XR Input. Check the project-settings " +
+                              "checklist in the Haptics region of FittsLawTask.cs.");
+    }
+
+    /// <summary>Primary path — required for Vive OpenXR controller profiles.</summary>
+    private bool TryOpenXRHaptics()
+    {
+        if (_hapticAction == null) InitHapticAction();
+        if (_hapticAction == null) return false;
+
+        try
+        {
+            // controls.Count == 0 means no connected device currently matches
+            // the binding (e.g. controller off/not tracked yet) — let the
+            // fallbacks have a try rather than silently doing nothing.
+            if (_hapticAction.controls.Count == 0) return false;
+
+            OpenXRInput.SendHapticImpulse(_hapticAction, hapticAmplitude, hapticDuration);
+            return true;
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[FittsLawTask] OpenXR haptic impulse failed: {e.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>Fallback #2 — Input System rumble-capable XR controllers.</summary>
+    private bool TryInputSystemRumble()
+    {
+        bool isLeft = hapticHandCharacteristic.HasFlag(UnityEngine.XR.InputDeviceCharacteristics.Left);
+        var targetUsage = isLeft ? CommonUsages.LeftHand : CommonUsages.RightHand;
+
+        foreach (var device in InputSystem.devices)
+        {
+            if (device is XRControllerWithRumble rumble && device.usages.Contains(targetUsage))
+            {
+                rumble.SendImpulse(hapticAmplitude, hapticDuration);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Fallback #3 — legacy XR.InputDevice path (last resort).</summary>
+    private bool TryLegacyXRHaptics()
+    {
+        if (!TryGetLegacyHapticDevice(out var device)) return false;
+        device.SendHapticImpulse(0, hapticAmplitude, hapticDuration);
+        return true;
+    }
+
+    private bool TryGetLegacyHapticDevice(out UnityEngine.XR.InputDevice device)
+    {
+        if (_legacyHapticDeviceCached && _legacyHapticDevice.isValid)
+        {
+            device = _legacyHapticDevice;
+            return true;
+        }
+
         var devices = new List<UnityEngine.XR.InputDevice>();
         UnityEngine.XR.InputDevices.GetDevicesWithCharacteristics(
-            UnityEngine.XR.InputDeviceCharacteristics.Right |
-            UnityEngine.XR.InputDeviceCharacteristics.Controller,
+            hapticHandCharacteristic | UnityEngine.XR.InputDeviceCharacteristics.Controller,
             devices);
+
         foreach (var dev in devices)
-            dev.SendHapticImpulse(0, hapticAmplitude, hapticDuration);
-#endif
+        {
+            if (!dev.isValid) continue;
+            if (dev.TryGetHapticCapabilities(out var caps) && caps.supportsImpulse)
+            {
+                _legacyHapticDevice       = dev;
+                _legacyHapticDeviceCached = true;
+                device                    = dev;
+                return true;
+            }
+        }
+
+        device = default;
+        return false;
+    }
+
+    private void StopHaptics()
+    {
+        if (_hapticAction != null)
+        {
+            try { OpenXRInput.StopHaptics(_hapticAction); }
+            catch { /* not fatal — impulse will simply run out its own duration */ }
+        }
+
+        if (_legacyHapticDeviceCached && _legacyHapticDevice.isValid)
+            _legacyHapticDevice.StopHaptics();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1382,6 +1571,7 @@ public class FittsLawTask : Goal
         BakeAllTextures();
         InitROS();
         EnsureDotIndicator();
+        InitHapticAction();
         ResetTask();
     }
 

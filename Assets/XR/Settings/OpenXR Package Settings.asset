@@ -12,7 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 51409463ea680134696701b5f24fafc3, type: 3}
   m_Name: HTCViveTrackerProfile Standalone
   m_EditorClassIdentifier: 
-  m_enabled: 0
+  m_enabled: 1
   nameUi: HTC VIVE Tracker Profile
   version: 0.0.1
   featureIdInternal: com.massive.openxr.feature.input.htcvivetracker
@@ -220,10 +220,6 @@ MonoBehaviour:
   - {fileID: 6657699415986086229}
   - {fileID: -351286008963335139}
   - {fileID: -950957732866311715}
-  - {fileID: 1046717498048625010}
-  - {fileID: -3185324308109408969}
-  - {fileID: -3178979655590946452}
-  - {fileID: -2814554570698199594}
   - {fileID: -7932745124612794974}
   - {fileID: -2436284077044732861}
   - {fileID: -2480789116947046951}
@@ -427,7 +423,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 274c02963f889a64e90bc2e596e21d13, type: 3}
   m_Name: HTCViveControllerProfile Standalone
   m_EditorClassIdentifier: 
-  m_enabled: 0
+  m_enabled: 1
   nameUi: HTC Vive Controller Profile
   version: 0.0.1
   featureIdInternal: com.unity.openxr.feature.input.htcvive
@@ -2082,11 +2078,6 @@ MonoBehaviour:
   - {fileID: 7952795186913560325}
   - {fileID: -6269622659563043404}
   - {fileID: 1448266554779385917}
-  - {fileID: 3657667867870845548}
-  - {fileID: 5574005786454243759}
-  - {fileID: 592790206875571734}
-  - {fileID: -2393493581784674675}
-  - {fileID: 1195327823819617673}
   - {fileID: -4813141669100989350}
   - {fileID: 5452621867648248748}
   - {fileID: -2766985367785398077}
@@ -2804,7 +2795,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: fe9ba5ccf170d54478c5df33f98aabc5, type: 3}
   m_Name: VIVEFocus3Profile Standalone
   m_EditorClassIdentifier: 
-  m_enabled: 0
+  m_enabled: 1
   nameUi: VIVE Focus 3 Controller Interaction
   version: 1.0.0
   featureIdInternal: vive.openxr.feature.focus3controller
