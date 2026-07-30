@@ -25,6 +25,15 @@ public class SimulationManager : MonoBehaviour
         public string filePath;
     }
 
+    [System.Serializable]
+    public class PresetPoseOption
+    {
+        public string displayName;
+        // ROS service name suffix, e.g. "home_pose" or "front_xy_grasp_pose"
+        // Full topic: /{armName}/preset_poses/{serviceName}
+        public string serviceName;
+    }
+
     [SerializeField]
     public string unitySystemIP = "127.0.0.1";
     public string[] environmentSceneNames;
@@ -35,6 +44,11 @@ public class SimulationManager : MonoBehaviour
 
     [Header("Mapping Files")]
     public List<MappingFileOption> mappingFileOptions = new List<MappingFileOption>();
+
+    [Header("Preset Poses")]
+    public List<PresetPoseOption> presetPoseOptions = new List<PresetPoseOption>();
+    public string rightArmName = "right_arm";
+    public string leftArmName  = "left_arm";
 
     public bool loadOnStart = true;
 
@@ -58,6 +72,7 @@ public class SimulationManager : MonoBehaviour
         ros.RegisterPublisher<BoolMsg>("/task/end");
         ros.RegisterPublisher<StringMsg>("/unity/camera_selection");
         ros.RegisterPublisher<StringMsg>("/mapping_player/file_path");
+        ros.RegisterPublisher<StringMsg>("/preset_pose_command");
 
         if (loadOnStart)
         {
@@ -100,6 +115,7 @@ public class SimulationManager : MonoBehaviour
         RegisterSceneAndInterfaceDashboardControl();
         RegisterCameraDashboardControls();
         RegisterMappingFileDashboardControls();
+        RegisterPresetPoseDashboardControls();
     }
 
     // ── Combined environment + interface load card ─────────────────────
@@ -170,7 +186,7 @@ public class SimulationManager : MonoBehaviour
     }
 #endif
 
-    // ── Camera selection dropdown (unchanged) ───────────────────────────
+    // ── Camera selection dropdown ───────────────────────────────────────
     private void RegisterCameraDashboardControls()
     {
         if (cameraOptions == null || cameraOptions.Length == 0)
@@ -191,7 +207,7 @@ public class SimulationManager : MonoBehaviour
             });
     }
 
-    // ── Mapping file toggle dropdown (unchanged) ────────────────────────
+    // ── Mapping file toggle dropdown ────────────────────────────────────
     private void RegisterMappingFileDashboardControls()
     {
         if (mappingFileOptions == null || mappingFileOptions.Count == 0)
@@ -223,7 +239,47 @@ public class SimulationManager : MonoBehaviour
             });
     }
 
-    // ── Everything below is unchanged from your original file ──────────
+    // ── Preset poses — one card per arm ────────────────────────────────
+    private void RegisterPresetPoseDashboardControls()
+    {
+        if (presetPoseOptions == null || presetPoseOptions.Count == 0)
+        {
+            Debug.LogWarning("SimulationManager: No preset pose options configured for dashboard.");
+            return;
+        }
+
+        string[] displayNames = presetPoseOptions.Select(p => p.displayName).ToArray();
+
+        RegisterPresetPoseCard("Right Arm Preset", rightArmName, displayNames);
+        RegisterPresetPoseCard("Left Arm Preset",  leftArmName,  displayNames);
+    }
+
+    private void RegisterPresetPoseCard(string cardTitle, string armName, string[] displayNames)
+    {
+        HTTPDash.Instance.RegisterDropdown(
+            cardTitle,
+            "Execute",
+            displayNames,
+            (string selectedDisplayName) =>
+            {
+                PresetPoseOption selected = presetPoseOptions
+                    .FirstOrDefault(p => p.displayName == selectedDisplayName);
+
+                if (selected == null)
+                {
+                    Debug.LogWarning($"SimulationManager: Unknown preset pose '{selectedDisplayName}'.");
+                    return;
+                }
+
+                ros.Publish("/preset_pose_command",
+                    new StringMsg($"{armName}/{selected.serviceName}"));
+
+                HTTPDash.Instance.SendNotification("Preset Pose",
+                    $"{armName}: {selected.displayName}", "blue");
+            });
+    }
+
+    // ── Scene / environment helpers ─────────────────────────────────────
     public void ResetCurrentEnvironment() => StartCoroutine(ResetEnvironmentCoroutine());
 
     private IEnumerator ResetEnvironmentCoroutine()

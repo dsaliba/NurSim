@@ -5,7 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
-//Generated with Chat GPT 
+//Generated with Chat GPT
 public class HTTPDash : MonoBehaviour
 {
     public static HTTPDash Instance { get; private set; }
@@ -101,9 +101,6 @@ public class HTTPDash : MonoBehaviour
                         int.TryParse(request.QueryString["since"], out since);
 
                         DataChannel ch = GetOrCreateChannel(channelName);
-                        // Either answers immediately (response closed inside) or queues the
-                        // context for a later Publish() to flush — either way we must not
-                        // touch `response` again here.
                         ch.TryRespondOrQueue(context, since);
                         continue;
                     }
@@ -165,12 +162,6 @@ public class HTTPDash : MonoBehaviour
     }
 
     // ── Generic versioned long-poll channel ─────────────────────────────
-    // Used for the cards list itself ("cards") and for any other dynamic
-    // feed (e.g. "recording-topics"). Holds the latest payload plus any
-    // clients that are caught up and waiting for the next change; a
-    // version check on entry means a client that lagged behind gets the
-    // answer immediately instead of being parked, closing the race where
-    // a publish happens in the gap between two long-poll requests.
     private class DataChannel
     {
         private readonly object lockObj = new object();
@@ -235,10 +226,7 @@ public class HTTPDash : MonoBehaviour
     }
 
     /// <summary>
-    /// Publish new data on an arbitrary named channel. Any client long-polling
-    /// /data/{name} gets it immediately. Use this from any script that wants
-    /// to push a live feed into the dashboard (e.g. RecordingManager pushing
-    /// the current ROS topic list).
+    /// Publish new data on an arbitrary named channel.
     /// </summary>
     public void PublishChannel(string name, string json)
     {
@@ -393,6 +381,66 @@ public class HTTPDash : MonoBehaviour
         }
     }
 
+    // ── Drag-order card ──────────────────────────────────────────────────
+
+    /// <summary>One item in an ordered list submission from a DragOrderCard.</summary>
+    [System.Serializable]
+    public class OrderedItemSubmission
+    {
+        public string name;
+        public bool enabled;
+    }
+
+    // Wrapper needed because JsonUtility cannot deserialise a root-level array.
+    [System.Serializable]
+    private class OrderedItemListWrapper
+    {
+        public List<OrderedItemSubmission> items;
+    }
+
+    /// <summary>
+    /// A card that displays a drag-and-drop reorderable list with per-item
+    /// enable/disable checkboxes. On submit, the callback receives the items
+    /// in the new order with their enabled state.
+    /// </summary>
+    [System.Serializable]
+    public class DragOrderCard : HTMLDashCard
+    {
+        public string title;
+        public string buttonText;
+        public string[] items;
+        public Action<List<OrderedItemSubmission>> callback;
+
+        public DragOrderCard(string title, string buttonText, string[] items, Action<List<OrderedItemSubmission>> callback)
+        {
+            this.id = HTMLDashCard.nextID++;
+            this.title = title;
+            this.buttonText = buttonText;
+            this.items = items;
+            this.callback = callback;
+        }
+
+        public override string AsJson()
+        {
+            string itemsJson = string.Join(",", items.Select(i => $"\"{Esc(i)}\""));
+            return $"{{\"type\":\"dragorder\",\"id\":{id},\"title\":\"{Esc(title)}\",\"buttonText\":\"{Esc(buttonText)}\",\"items\":[{itemsJson}]}}";
+        }
+
+        public override void Invoke(string rawBody)
+        {
+            try
+            {
+                // Wrap the JSON array so JsonUtility can handle it.
+                var wrapper = JsonUtility.FromJson<OrderedItemListWrapper>($"{{\"items\":{rawBody}}}");
+                callback?.Invoke(wrapper?.items ?? new List<OrderedItemSubmission>());
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"DragOrderCard: failed to parse submission: {e.Message}\nBody: {rawBody}");
+            }
+        }
+    }
+
     /// <summary>One key/value pair, used for ordered "condition" selections.</summary>
     [System.Serializable]
     public class ConditionValuePair
@@ -411,14 +459,6 @@ public class HTTPDash : MonoBehaviour
         public List<string> topics;
     }
 
-    /// <summary>
-    /// Dedicated card for the Recording tab: participant field, N condition
-    /// dropdowns (populated dynamically via RecordingManager), and Start/Stop
-    /// buttons. The scrollable topic checklist is NOT baked into this card's
-    /// JSON — it's rendered client-side from the separate "recording-topics"
-    /// channel, so refreshing the topic list never disturbs the user's
-    /// in-progress selections or causes the whole card to re-render.
-    /// </summary>
     [System.Serializable]
     public class RecordingCard : HTMLDashCard
     {
@@ -500,8 +540,19 @@ public class HTTPDash : MonoBehaviour
     }
 
     /// <summary>
-    /// Call after mutating a card object in place (e.g. RecordingCard.conditions)
-    /// to re-publish the cards channel without adding a duplicate card.
+    /// Register a drag-and-drop reorder card. The callback fires on the main
+    /// thread with the items in their new order and their enabled states.
+    /// </summary>
+    public DragOrderCard RegisterDragOrder(string title, string buttonText, string[] items, Action<List<OrderedItemSubmission>> callback)
+    {
+        var card = new DragOrderCard(title, buttonText, items, callback);
+        lock (cardsLock) { cards.Add(card); }
+        BumpCardsVersionAndFlush();
+        return card;
+    }
+
+    /// <summary>
+    /// Call after mutating a card object in place to re-publish the cards channel.
     /// </summary>
     public void NotifyCardsChanged() => BumpCardsVersionAndFlush();
 
@@ -594,6 +645,7 @@ public class HTTPDash : MonoBehaviour
       box-sizing: border-box;
     }
     .card.multifield { max-height: none; }
+    .card.dragorder  { max-height: none; max-width: 360px; }
     .card:hover { transform: translateY(-2px); }
     .card h2 { margin-top: 0; color: crimson; }
     .card label { display: block; margin-top: 0.6em; font-size: 0.8em; color: #777; }
@@ -620,6 +672,57 @@ public class HTTPDash : MonoBehaviour
       margin-top: 0.8em;
     }
     .card button:hover { background: #a4161a; }
+
+    /* ── Drag-order list ── */
+    .drag-list {
+      list-style: none;
+      padding: 0;
+      margin: 0.5em 0 0;
+    }
+    .drag-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5em;
+      padding: 0.45em 0.6em;
+      margin: 0.25em 0;
+      background: #f9f9f9;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      user-select: none;
+      cursor: default;
+      transition: background 0.1s, border-color 0.1s;
+    }
+    .drag-item.dragging  { opacity: 0.35; }
+    .drag-item.drag-over { border-color: crimson; background: #fff0f3; }
+    .drag-handle {
+      cursor: grab;
+      color: #bbb;
+      font-size: 1.2em;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .drag-handle:active { cursor: grabbing; }
+    .drag-check {
+      width: auto !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+    .drag-label {
+      flex: 1;
+      font-size: 0.9em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .drag-index {
+      font-size: 0.75em;
+      color: #bbb;
+      flex-shrink: 0;
+      min-width: 1.2em;
+      text-align: right;
+    }
 
     .recording-container { padding: 1.5em; box-sizing: border-box; }
     .recording-panel {
@@ -736,6 +839,58 @@ public class HTTPDash : MonoBehaviour
     let recordingTopics = [];
     let recordingSelected = {}; // cardId -> Set of topic names
 
+    // ── Drag-order helpers ────────────────────────────────────────────────
+
+    function initDragList(listId) {
+      const list = document.getElementById(listId);
+      if (!list) return;
+      let dragged = null;
+
+      list.addEventListener('dragstart', e => {
+        dragged = e.target.closest('.drag-item');
+        if (!dragged) return;
+        // Use setTimeout so the 'dragging' class is applied after the
+        // browser captures the drag image.
+        setTimeout(() => dragged && dragged.classList.add('dragging'), 0);
+      });
+
+      list.addEventListener('dragend', () => {
+        if (dragged) dragged.classList.remove('dragging');
+        list.querySelectorAll('.drag-item').forEach(el => el.classList.remove('drag-over'));
+        dragged = null;
+        refreshDragIndices(list);
+      });
+
+      list.addEventListener('dragover', e => {
+        e.preventDefault();
+        if (!dragged) return;
+        const target = e.target.closest('.drag-item');
+        if (!target || target === dragged) return;
+        list.querySelectorAll('.drag-item').forEach(el => el.classList.remove('drag-over'));
+        target.classList.add('drag-over');
+        const rect = target.getBoundingClientRect();
+        if (e.clientY < rect.top + rect.height / 2) {
+          list.insertBefore(dragged, target);
+        } else {
+          list.insertBefore(dragged, target.nextSibling);
+        }
+      });
+
+      list.addEventListener('dragleave', e => {
+        const target = e.target.closest('.drag-item');
+        if (target && target !== dragged) target.classList.remove('drag-over');
+      });
+    }
+
+    function refreshDragIndices(list) {
+      list.querySelectorAll('.drag-item').forEach((el, i) => {
+        const idx = el.querySelector('.drag-index');
+        if (idx) idx.textContent = (i + 1) + '.';
+      });
+    }
+
+    // ── Card rendering ────────────────────────────────────────────────────
+
     function renderCards(cardList) {
       renderNormalCards(cardList.filter(c => c.type !== ""recording""));
       renderRecordingCards(cardList.filter(c => c.type === ""recording""));
@@ -747,22 +902,27 @@ public class HTTPDash : MonoBehaviour
 
       cardList.forEach((card) => {
         const div = document.createElement(""div"");
-        div.className = ""card"" + (card.type === ""multifield"" ? "" multifield"" : """");
+        div.className = ""card"" +
+          (card.type === ""multifield"" ? "" multifield"" : """") +
+          (card.type === ""dragorder""  ? "" dragorder""  : """");
         let html = `<h2>${card.title}</h2>`;
 
         if (card.type === ""button"") {
           html += `<button id=""btn-${card.id}"">${card.buttonText}</button>`;
+
         } else if (card.type === ""input"") {
           html += `
             <input id=""input-${card.id}"" type=""text"" placeholder=""${card.placeHolder}"">
             <button id=""submit-input-${card.id}"">${card.buttonText}</button>
           `;
+
         } else if (card.type === ""dropdown"") {
           const options = card.options.map(opt => `<option value=""${opt}"">${opt}</option>`).join("""");
           html += `
             <select id=""select-${card.id}"">${options}</select>
             <button id=""submit-select-${card.id}"">${card.buttonText}</button>
           `;
+
         } else if (card.type === ""multifield"") {
           card.fields.forEach(f => {
             if (f.fieldType === ""dropdown"") {
@@ -773,25 +933,40 @@ public class HTTPDash : MonoBehaviour
             }
           });
           html += `<button id=""submit-mf-${card.id}"">${card.buttonText}</button>`;
+
+        } else if (card.type === ""dragorder"") {
+          const itemRows = card.items.map((name, i) => `
+            <li class=""drag-item"" draggable=""true"" data-name=""${name}"">
+              <span class=""drag-handle"">&#x2807;</span>
+              <input type=""checkbox"" class=""drag-check"" checked title=""Enable/disable this goal"">
+              <span class=""drag-label"">${name}</span>
+              <span class=""drag-index"">${i + 1}.</span>
+            </li>`).join("""");
+          html += `<ul id=""draglist-${card.id}"" class=""drag-list"">${itemRows}</ul>`;
+          html += `<button id=""submit-drag-${card.id}"">${card.buttonText}</button>`;
         }
 
         div.innerHTML = html;
         container.appendChild(div);
 
+        // Wire events
         if (card.type === ""button"") {
           document.getElementById(`btn-${card.id}`).addEventListener(""click"", () => {
             fetch(`/action/${card.id}`, { method: ""POST"", body: card.title });
           });
+
         } else if (card.type === ""input"") {
           document.getElementById(`submit-input-${card.id}`).addEventListener(""click"", () => {
             const value = document.getElementById(`input-${card.id}`).value;
             fetch(`/action/${card.id}`, { method: ""POST"", body: value });
           });
+
         } else if (card.type === ""dropdown"") {
           document.getElementById(`submit-select-${card.id}`).addEventListener(""click"", () => {
             const value = document.getElementById(`select-${card.id}`).value;
             fetch(`/action/${card.id}`, { method: ""POST"", body: value });
           });
+
         } else if (card.type === ""multifield"") {
           document.getElementById(`submit-mf-${card.id}`).addEventListener(""click"", () => {
             const parts = card.fields.map(f => {
@@ -799,6 +974,21 @@ public class HTTPDash : MonoBehaviour
               return `${encodeURIComponent(f.key)}=${encodeURIComponent(el.value)}`;
             });
             fetch(`/action/${card.id}`, { method: ""POST"", body: parts.join(""&"") });
+          });
+
+        } else if (card.type === ""dragorder"") {
+          initDragList(`draglist-${card.id}`);
+          document.getElementById(`submit-drag-${card.id}`).addEventListener(""click"", () => {
+            const list = document.getElementById(`draglist-${card.id}`);
+            const items = Array.from(list.querySelectorAll('.drag-item')).map(li => ({
+              name: li.dataset.name,
+              enabled: li.querySelector('.drag-check').checked
+            }));
+            fetch(`/action/${card.id}`, {
+              method: ""POST"",
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(items)
+            });
           });
         }
       });
@@ -855,12 +1045,10 @@ public class HTTPDash : MonoBehaviour
         document.getElementById(`rec-start-${card.id}`).addEventListener(""click"", () => submitRecording(card, ""start""));
         document.getElementById(`rec-stop-${card.id}`).addEventListener(""click"", () => submitRecording(card, ""stop""));
 
-        loadSelection(card.id, true); // silently restore from cookie if present
+        loadSelection(card.id, true);
         renderTopicList(card.id);
       });
 
-      // First time any recording card exists, make sure we have a current
-      // topic snapshot rather than waiting on the next change event.
       if (cardList.length > 0) fetchTopicsNow();
     }
 
@@ -890,9 +1078,6 @@ public class HTTPDash : MonoBehaviour
       });
     }
 
-    // Forces an immediate read of whatever the server currently has cached
-    // for the recording-topics channel, bypassing the long-poll wait. Safe
-    // to call any time; does not interfere with the background poll loop.
     function fetchTopicsNow() {
       fetch(""/data/recording-topics?since=-1"")
         .then(r => r.json())

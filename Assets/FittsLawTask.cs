@@ -55,6 +55,12 @@ using UnityEditor;
 ///     /fitts/movement/*        — Int32 / Float32 / geometry_msgs/Point,
 ///                                 one synchronized burst per completed
 ///                                 movement (T1→T2, T2→T3, ...).
+///     /fitts/pointer/*         — geometry_msgs/Point, published at every
+///                                 trajectory sample interval throughout the
+///                                 task (position_plane and position_3d).
+///                                 Used to reconstruct per-movement paths in
+///                                 post-processing by slicing on
+///                                 [settle_time - duration, settle_time].
 ///     /fitts/task_complete/*   — Int32 / Float32, final run summary,
 ///                                 published exactly once at the end.
 ///   See fitts_ros_data_format.md for the full topic/field reference and
@@ -168,6 +174,17 @@ public class FittsLawTask : Goal
         UnityEngine.XR.InputDeviceCharacteristics.Right;
 
     // ─────────────────────────────────────────────────────────────────────────
+    //  Audio feedback
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Header("Audio Feedback")]
+    [Tooltip("Clip played each time the pointer settles on a target zone.")]
+    [SerializeField] private AudioClip _hitSound;
+
+    [Range(0f, 1f)]
+    [SerializeField] private float _hitSoundVolume = 1f;
+
+    // ─────────────────────────────────────────────────────────────────────────
     //  ROS topics  (each is a BASE path; actual leaves are "{base}/{field}")
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -175,6 +192,7 @@ public class FittsLawTask : Goal
     public string rosTopicLayoutStats  = "/fitts/layout_stats";
     public string rosTopicActiveTarget = "/fitts/active_target";
     public string rosTopicMovement     = "/fitts/movement";
+    public string rosTopicPointer      = "/fitts/pointer";
     public string rosTopicTaskComplete = "/fitts/task_complete";
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -209,6 +227,18 @@ public class FittsLawTask : Goal
     public Color targetActiveColour      = new Color(0.1f, 1.0f, 0.3f, 0.55f);
     public Color targetDoneColour        = new Color(0.6f, 0.6f, 0.6f, 0.20f);
     public Color trajectoryColour        = new Color(1.0f, 0.5f, 0.0f, 0.80f);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Physical sheet print command  (auto-generated, edit-mode read-only)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Header("Physical Sheet — Print Command")]
+    [Tooltip("Run this in your terminal to generate a matching 1:1 PDF for the Vive Ultimate Tracker setup.\n\n"
+           + "Sheet size is derived from the Plane's world-space lossy scale (accounts for parent transforms):\n"
+           + "  sheet_mm = lossyScale.x * 10 * 1000  (Unity Plane is 10 local units)\n\n"
+           + "Copy the command and run: pip install reportlab numpy pyyaml (one-time).")]
+    [SerializeField]
+    public string _printSheetCommand = "";
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Read-only inspector info
@@ -298,6 +328,7 @@ public class FittsLawTask : Goal
         RebuildLayout();
         RegenerateEditorPreview();
         UpdateDotIndicator();
+        UpdatePrintCommand();
     }
 
     private void Start()
@@ -326,9 +357,6 @@ public class FittsLawTask : Goal
         if (!Application.isPlaying) return;
 
         // ── Haptic stop timer ────────────────────────────────────────────────
-        // Explicit stop rather than relying solely on the runtime's internal
-        // duration timeout — some OpenXR runtimes are inconsistent about
-        // auto-stopping a haptic impulse after the requested duration.
         if (_hapticStopTime > 0f && Time.time >= _hapticStopTime)
         {
             _hapticStopTime = -1f;
@@ -339,7 +367,7 @@ public class FittsLawTask : Goal
         if (pointer == null) return;
         if (_targetPositions3D == null || _targetPositions3D.Length == 0) return;
 
-        // ── Sample trajectory ────────────────────────────────────────────────
+        // ── Sample trajectory & stream pointer position to ROS ───────────────
         if (Time.time - _lastSampleTime >= trajectorySampleInterval)
         {
             _lastSampleTime = Time.time;
@@ -348,22 +376,23 @@ public class FittsLawTask : Goal
             _currentTraj3D.Add(p3);
             _currentTrajPlane.Add(p2);
             _currentTrajTimes.Add(Time.time - _movementStartTime);
+
+            // Publish live pointer position so bagpipe records a trajectory CSV.
+            // Published from the moment the task becomes active (T1 dwell onwards)
+            // so the full path of every movement is captured.
+            ROSPublishPointerPosition(p3, p2);
         }
 
         // ── Dwell detection ──────────────────────────────────────────────────
-        // _visitOrder holds 0-based slot indices; use directly
         int     activeSlot     = _visitOrder[_visitStep];
         Vector3 targetPos      = _targetPositions3D[activeSlot];
         float   targetRadius3D = TargetRadius3D();
 
-        // Project both pointer and target into the plane's local XZ space so
-        // that the hand's Y offset above the plane surface doesn't prevent dwell.
         Vector3 pointerLocal = transform.InverseTransformPoint(pointer.position);
         Vector3 targetLocal  = transform.InverseTransformPoint(targetPos);
         float   dist         = Vector2.Distance(
             new Vector2(pointerLocal.x, pointerLocal.z),
             new Vector2(targetLocal.x,  targetLocal.z));
-
 
         if (dist <= targetRadius3D)
         {
@@ -396,10 +425,6 @@ public class FittsLawTask : Goal
     //  Goal override
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Returns true once every target in the Fitts' Law sequence has been hit.
-    /// The <paramref name="obj"/> parameter is intentionally ignored.
-    /// </summary>
     public new bool CheckIfObjectReachedGoal(GameObject obj) => _taskComplete;
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -420,12 +445,6 @@ public class FittsLawTask : Goal
         _records.Clear();
         StartNewMovement();
         ApplyTextureForStep(0);
-        // layout_stats and the first active_target publish are intentionally
-        // deferred until the pointer actually settles on T1 (see RegisterHit).
-        // That moment is the real start of the task — publishing the static
-        // header info there guarantees any recording that begins up to that
-        // point still captures it. Latching (see InitROS) covers recordings
-        // that start even later than that.
     }
 
     private void StartNewMovement()
@@ -441,17 +460,16 @@ public class FittsLawTask : Goal
 
     private void RegisterHit(int hitSlot)
     {
-        // ── First hit: start target settled — begin timing, don't record a movement ──
+        // ── First hit: T1 settled — begin timing, don't record a movement ────
         if (_waitingForStart)
         {
             _waitingForStart        = false;
             _waitingForStartDisplay = false;
 
-            // Canonical t=0 for the task: publish the static layout header
-            // exactly when the pointer settles on T1, not at ResetTask.
             ROSPublishLayoutStats();
 
             TriggerHaptics();
+            PlayHitSound();
 
             _visitStep++;
             if (_visitStep >= _visitOrder.Length)
@@ -502,6 +520,7 @@ public class FittsLawTask : Goal
         _movementsCompleted++;
 
         TriggerHaptics();
+        PlayHitSound();
         ROSPublishMovement(rec);
 
         _visitStep++;
@@ -541,28 +560,21 @@ public class FittsLawTask : Goal
         {
             _targetPositionsPlane[i] = ImageToPlaneNorm(ImageSpacePosition(i));
             Vector3 worldPos = PlaneNormToWorld(_targetPositionsPlane[i]);
-            // Mirror X around the plane centre to match the material mainTextureScale.x = -1 flip.
             Vector3 centre3D = transform.position;
             Vector3 right    = transform.right;
             float   dot      = Vector3.Dot(worldPos - centre3D, right);
             _targetPositions3D[i] = worldPos - 2f * dot * right;
         }
 
-        // _visitOrder[step] = slot index (0-based) to visit at that step.
-        // Slot 0 is at 12 o'clock, slots increase clockwise.
-        // ISO 9241-9 alternating-opposite: 0, n/2, 1, n/2+1, 2, n/2+2, …
         _visitOrder = BuildVisitOrder(numTargets);
 
-        // _slotLabel[slot] = 1-based label printed on that slot.
-        // The first slot visited is labelled T1, the second T2, etc.
         _slotLabel = new int[numTargets];
         for (int step = 0; step < _visitOrder.Length; step++)
             _slotLabel[_visitOrder[step]] = step + 1;
 
         if (_visitOrder.Length > 0)
-            _currentTargetLabel = _slotLabel[_visitOrder[0]];   // always T1
+            _currentTargetLabel = _slotLabel[_visitOrder[0]];
 
-        // Layout-level Fitts' ID: chord between alternating-opposite slots.
         int   halfSteps = numTargets / 2;
         float theta     = 2f * Mathf.PI * halfSteps / numTargets;
         float chordPx   = 2f * radiusPx * Mathf.Sin(theta * 0.5f);
@@ -571,13 +583,8 @@ public class FittsLawTask : Goal
             : 0f;
     }
 
-    // Maps slot index → 1-based display label (T1, T2, …)
     private int[] _slotLabel;
 
-    /// <summary>
-    /// Image-space position of target with 0-based index i.
-    /// Origin at image centre, Y-up. Target 0 is at 12 o'clock.
-    /// </summary>
     private Vector2 ImageSpacePosition(int zeroBasedIndex)
     {
         float angle = -Mathf.PI / 2f + 2f * Mathf.PI * zeroBasedIndex / numTargets;
@@ -608,18 +615,9 @@ public class FittsLawTask : Goal
 
     private float TargetRadius3D()
     {
-        // Distance is measured in the plane's local space (via InverseTransformPoint),
-        // so the radius is purely the pixel fraction of the 10-unit local plane — no
-        // world scale factor needed or wanted.
         return (targetWidthPx * 0.5f / imageSizePx) * 10f;
     }
 
-    /// <summary>
-    /// ISO 9241-9 alternating-opposite visit order as 0-based slot indices.
-    /// Slot 0 = 12 o'clock, slots increase clockwise.
-    /// For n=8: [0, 4, 1, 5, 2, 6, 3, 7]
-    /// For n=9: [0, 4, 1, 5, 2, 6, 3, 7, 8]
-    /// </summary>
     private static int[] BuildVisitOrder(int n)
     {
         int half = n / 2;
@@ -635,20 +633,35 @@ public class FittsLawTask : Goal
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  ROS publishing  (hierarchical primitive topics — no JSON)
+    //  Physical sheet print command
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Builds a leaf topic path from a configurable base + field name.</summary>
+    private void UpdatePrintCommand()
+    {
+        float lossyW   = Mathf.Abs(transform.lossyScale.x);
+        float lossyH   = Mathf.Abs(transform.lossyScale.z);
+        float sheetWmm = lossyW * 10f * 1000f;
+        float sheetHmm = lossyH * 10f * 1000f;
+
+        string sizeArg = Mathf.Abs(sheetWmm - sheetHmm) < 0.5f
+            ? $"--unity-plane-scale {lossyW:G6}"
+            : $"--sheet-width-mm {sheetWmm:F1} --sheet-height-mm {sheetHmm:F1}";
+
+        _printSheetCommand =
+            $"python fitts_pdf_generator.py {sizeArg} --num-targets {numTargets} --target-width-px {targetWidthPx:G6} --radius-px {radiusPx:G6} --image-size-px {imageSizePx} --output fitts_sheet.pdf";
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ROS publishing
+    // ─────────────────────────────────────────────────────────────────────────
+
     private static string T(string baseTopic, string suffix) => baseTopic.TrimEnd('/') + "/" + suffix;
 
     private void InitROS()
     {
         _ros = ROSConnection.GetOrCreateInstance();
 
-        // Latched: layout_stats and active_target represent "the current
-        // state of the run" rather than discrete events, so a subscriber
-        // (including rosbag record) that connects late still immediately
-        // receives the last published value.
+        // Latched static topics
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicLayoutStats, "num_targets"), latch: true);
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicLayoutStats, "target_width_px"), latch: true);
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicLayoutStats, "radius_px"), latch: true);
@@ -661,7 +674,7 @@ public class FittsLawTask : Goal
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicActiveTarget, "visit_step"), latch: true);
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicActiveTarget, "total_steps"), latch: true);
 
-        // Not latched: these are discrete per-event streams, not "current state".
+        // Per-movement burst topics
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "index"));
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "from_label"));
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "to_label"));
@@ -673,6 +686,13 @@ public class FittsLawTask : Goal
         _ros.RegisterPublisher<PointMsg>(T(rosTopicMovement, "settle_position_plane"));
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "trajectory_samples"));
 
+        // Continuous pointer position stream — one message per trajectory sample.
+        // Slice by [settle_time - duration, settle_time] in post-processing to
+        // reconstruct per-movement paths.
+        _ros.RegisterPublisher<PointMsg>(T(rosTopicPointer, "position_plane"));
+        _ros.RegisterPublisher<PointMsg>(T(rosTopicPointer, "position_3d"));
+
+        // Task summary
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicTaskComplete, "total_movements"));
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "total_time_seconds"));
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "mean_movement_time_seconds"));
@@ -680,6 +700,23 @@ public class FittsLawTask : Goal
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "mean_fitts_id"));
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "throughput_bps"));
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "layout_fitts_id"));
+    }
+
+    private void ROSPublishPointerPosition(Vector3 pos3D, Vector2 posPlane)
+    {
+        if (_ros == null) return;
+        _ros.Publish(T(rosTopicPointer, "position_plane"), new PointMsg
+        {
+            x = posPlane.x,
+            y = posPlane.y,
+            z = 0.0
+        });
+        _ros.Publish(T(rosTopicPointer, "position_3d"), new PointMsg
+        {
+            x = pos3D.x,
+            y = pos3D.y,
+            z = pos3D.z
+        });
     }
 
     private void ROSPublishLayoutStats()
@@ -690,7 +727,6 @@ public class FittsLawTask : Goal
         float theta   = 2f * Mathf.PI * half / numTargets;
         float chordPx = 2f * radiusPx * Mathf.Sin(theta * 0.5f);
 
-        // 1-indexed T-labels in visit order, e.g. [1,5,2,6,3,7,4,8,9]
         int[] visitLabels = (_slotLabel != null && _visitOrder != null)
             ? Array.ConvertAll(_visitOrder, s => _slotLabel[s])
             : (_visitOrder ?? Array.Empty<int>());
@@ -703,7 +739,7 @@ public class FittsLawTask : Goal
         _ros.Publish(T(rosTopicLayoutStats, "fitts_id"), new Float32Msg { data = _fittsID });
         _ros.Publish(T(rosTopicLayoutStats, "visit_sequence"), new Int32MultiArrayMsg { data = visitLabels });
 
-        Debug.Log($"[FittsLawTask] Layout stats published under {rosTopicLayoutStats}/* (task start / T1 settled)");
+        Debug.Log($"[FittsLawTask] Layout stats published under {rosTopicLayoutStats}/*");
     }
 
     private void ROSPublishActiveTarget()
@@ -719,13 +755,6 @@ public class FittsLawTask : Goal
         _ros.Publish(T(rosTopicActiveTarget, "total_steps"), new Int32Msg { data = _visitOrder.Length });
     }
 
-    /// <summary>
-    /// Publishes the terminal sentinel for the active-target stream: label = -1
-    /// signals unambiguously that no target is active any more, so the last
-    /// real target's value doesn't appear to "hold forever" when inspecting
-    /// or replaying the bag. visit_step is cleared the same way; total_steps
-    /// is left untouched since it's static layout info, not a moving value.
-    /// </summary>
     private void ROSPublishActiveTargetCleared()
     {
         if (_ros == null) return;
@@ -802,42 +831,12 @@ public class FittsLawTask : Goal
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Haptics  (OpenXR action-based — required for Vive OpenXR controllers)
+    //  Haptics
     // ─────────────────────────────────────────────────────────────────────────
-    //
-    // WHY THE OLD APPROACH DIDN'T WORK:
-    // UnityEngine.XR.InputDevice.SendHapticImpulse() (the "legacy XR Input"
-    // device-based path) routes through each runtime's implicit default
-    // haptic binding. HTC's Vive OpenXR feature group ships its own
-    // controller interaction profiles (Vive Controller / Focus 3 / Cosmos,
-    // etc.) rather than the generic Khronos Simple Controller profile, and
-    // those Vive-specific profiles frequently don't surface a haptic output
-    // through that implicit binding — TryGetHapticCapabilities() on the
-    // device reports supportsImpulse = false even though the hardware can
-    // physically buzz.
-    //
-    // THE FIX:
-    // Unity's OpenXR Plugin's *action-based* haptics API
-    // (UnityEngine.XR.OpenXR.Input.OpenXRInput.SendHapticImpulse) instead
-    // routes through an explicit Input System binding path
-    // ("<XRController>{RightHand}/haptic"), which Vive's interaction
-    // profiles DO support — this is also what Unity's own OpenXR sample
-    // project uses for haptics, independent of headset vendor. The
-    // InputAction is built in code below, so no manual Input Action Asset
-    // wiring is required in the Inspector.
-    //
-    // Two extra fallbacks are layered underneath in case this script is
-    // ever run on a different XR backend:
-    //   1) OpenXR action-based haptics            (primary — fixes Vive)
-    //   2) Input System XRControllerWithRumble    (covers some non-OpenXR
-    //                                                Input-System-exposed
-    //                                                controllers)
-    //   3) Legacy XR.InputDevice haptics           (last resort)
 
     private InputAction _hapticAction;
     private bool        _hapticActionInitialized = false;
 
-    // Cached legacy-path device (fallback #3 only).
     private UnityEngine.XR.InputDevice _legacyHapticDevice;
     private bool _legacyHapticDeviceCached = false;
 
@@ -859,8 +858,7 @@ public class FittsLawTask : Goal
         }
         catch (Exception e)
         {
-            Debug.LogWarning($"[FittsLawTask] Could not create OpenXR haptic action " +
-                              $"(OpenXR Plugin / Input System may not be set up): {e.Message}");
+            Debug.LogWarning($"[FittsLawTask] Could not create OpenXR haptic action: {e.Message}");
             _hapticAction = null;
         }
     }
@@ -876,22 +874,14 @@ public class FittsLawTask : Goal
     private void TriggerHaptics()
     {
         bool sent = TryOpenXRHaptics();
-
-        if (!sent)
-            sent = TryInputSystemRumble();
-
-        if (!sent)
-            sent = TryLegacyXRHaptics();
-
+        if (!sent) sent = TryInputSystemRumble();
+        if (!sent) sent = TryLegacyXRHaptics();
         _hapticStopTime = sent ? Time.time + hapticDuration : -1f;
 
         if (!sent)
-            Debug.LogWarning("[FittsLawTask] No haptic-capable controller found via OpenXR, " +
-                              "Input System rumble, or legacy XR Input. Check the project-settings " +
-                              "checklist in the Haptics region of FittsLawTask.cs.");
+            Debug.LogWarning("[FittsLawTask] No haptic-capable controller found.");
     }
 
-    /// <summary>Primary path — required for Vive OpenXR controller profiles.</summary>
     private bool TryOpenXRHaptics()
     {
         if (_hapticAction == null) InitHapticAction();
@@ -899,11 +889,7 @@ public class FittsLawTask : Goal
 
         try
         {
-            // controls.Count == 0 means no connected device currently matches
-            // the binding (e.g. controller off/not tracked yet) — let the
-            // fallbacks have a try rather than silently doing nothing.
             if (_hapticAction.controls.Count == 0) return false;
-
             OpenXRInput.SendHapticImpulse(_hapticAction, hapticAmplitude, hapticDuration);
             return true;
         }
@@ -914,7 +900,6 @@ public class FittsLawTask : Goal
         }
     }
 
-    /// <summary>Fallback #2 — Input System rumble-capable XR controllers.</summary>
     private bool TryInputSystemRumble()
     {
         bool isLeft = hapticHandCharacteristic.HasFlag(UnityEngine.XR.InputDeviceCharacteristics.Left);
@@ -931,7 +916,6 @@ public class FittsLawTask : Goal
         return false;
     }
 
-    /// <summary>Fallback #3 — legacy XR.InputDevice path (last resort).</summary>
     private bool TryLegacyXRHaptics()
     {
         if (!TryGetLegacyHapticDevice(out var device)) return false;
@@ -968,12 +952,23 @@ public class FittsLawTask : Goal
         return false;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Audio feedback
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void PlayHitSound()
+    {
+        if (_hitSound == null) return;
+        Vector3 pos = pointer != null ? pointer.position : transform.position;
+        AudioSource.PlayClipAtPoint(_hitSound, pos, _hitSoundVolume);
+    }
+
     private void StopHaptics()
     {
         if (_hapticAction != null)
         {
             try { OpenXRInput.StopHaptics(_hapticAction); }
-            catch { /* not fatal — impulse will simply run out its own duration */ }
+            catch { }
         }
 
         if (_legacyHapticDeviceCached && _legacyHapticDevice.isValid)
@@ -991,11 +986,10 @@ public class FittsLawTask : Goal
         _dotIndicator      = GameObject.CreatePrimitive(PrimitiveType.Sphere);
         _dotIndicator.name = "FittsLaw_DotIndicator";
 
-        // Remove collider — must not interfere with dwell detection
         var col = _dotIndicator.GetComponent<Collider>();
         if (col != null) Destroy(col);
 
-        var mr  = _dotIndicator.GetComponent<MeshRenderer>();
+        var mr = _dotIndicator.GetComponent<MeshRenderer>();
         if (mr != null)
         {
             var mat   = new Material(Shader.Find("Unlit/Color") ?? Shader.Find("Standard"));
@@ -1021,7 +1015,7 @@ public class FittsLawTask : Goal
         if (!visible) return;
 
         float   radius     = TargetRadius3D() * Mathf.Abs(transform.lossyScale.x) * dotRadiusFraction;
-        int     activeSlot = _visitOrder[_visitStep];   // already a 0-based slot index
+        int     activeSlot = _visitOrder[_visitStep];
         Vector3 pos        = _targetPositions3D[activeSlot] + transform.up * dotHeightOffset;
 
         _dotIndicator.transform.position   = pos;
@@ -1033,24 +1027,15 @@ public class FittsLawTask : Goal
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Texture system — pre-baked, zero runtime allocation
+    //  Texture system
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Bakes one Texture2D per visit step and stores them in _cachedTextures.
-    /// Called once at task start (and in editor on validate). After this,
-    /// changing the active target is a free mainTexture pointer swap.
-    /// Step 0 = all targets idle (waiting on T1).
-    /// Step k = first k slots done, slot _visitOrder[k] active.
-    /// Step numTargets = all done.
-    /// </summary>
     private void BakeAllTextures()
     {
         if (numTargets < 3 || imageSizePx < 64 || _visitOrder == null) return;
 
         int totalSteps = _visitOrder.Length + 1;
 
-        // Use pre-baked disk assets if they match — zero generation cost at runtime.
         if (_prebakedTextures != null && _prebakedTextures.Length == totalSteps
             && _prebakedTextures[0] != null)
         {
@@ -1059,7 +1044,6 @@ public class FittsLawTask : Goal
             return;
         }
 
-        // Fall back to runtime generation.
         DestroyCachedTextures();
         _cachedTextures = new Texture2D[totalSteps];
         for (int step = 0; step < totalSteps; step++)
@@ -1068,11 +1052,6 @@ public class FittsLawTask : Goal
         ApplyTextureForStep(0);
     }
 
-    /// <summary>
-    /// Called from the custom inspector button or right-click context menu.
-    /// Bakes all textures and saves them as PNG assets on disk under Assets/FittsBaked/
-    /// so runtime never needs to generate them.
-    /// </summary>
     [ContextMenu("Bake Fitts Textures")]
     public void BakeAndSaveTextures()
     {
@@ -1084,7 +1063,7 @@ public class FittsLawTask : Goal
         if (!UnityEditor.AssetDatabase.IsValidFolder(folder))
             UnityEditor.AssetDatabase.CreateFolder("Assets", "FittsBaked");
 
-        string assetName = $"FittsLayout_{gameObject.name.Replace(" ", "_")}";
+        string assetName  = $"FittsLayout_{gameObject.name.Replace(" ", "_")}";
         int    totalSteps = _visitOrder.Length + 1;
 
         _prebakedTextures = new Texture2D[totalSteps];
@@ -1116,7 +1095,6 @@ public class FittsLawTask : Goal
         UnityEditor.AssetDatabase.SaveAssets();
         Debug.Log($"[FittsLawTask] Baked {totalSteps} textures → {folder}/{assetName}_step*.png");
 
-        // Show step 0 as the editor preview immediately.
         var mr = GetComponent<MeshRenderer>();
         if (mr != null)
         {
@@ -1127,10 +1105,6 @@ public class FittsLawTask : Goal
 #endif
     }
 
-    /// <summary>
-    /// Swaps the material's mainTexture to the pre-baked texture for the given step.
-    /// Zero allocation, zero GPU upload.
-    /// </summary>
     private void ApplyTextureForStep(int step)
     {
         if (_cachedTextures == null) return;
@@ -1145,7 +1119,6 @@ public class FittsLawTask : Goal
         mat.mainTextureOffset = new Vector2(0f, 0f);
     }
 
-    /// <summary>Builds a single texture for one visit step state.</summary>
     private Texture2D BakeTexture(int step)
     {
         int size  = imageSizePx;
@@ -1178,21 +1151,13 @@ public class FittsLawTask : Goal
         return tex;
     }
 
-    /// <summary>Returns the colour a slot should have at a given baked step.</summary>
     private Color32 ColourForSlotAtStep(int slot, int step)
     {
         if (_visitOrder == null) return texTargetColour;
-
-        // All done
         if (step >= _visitOrder.Length) return texDoneColour;
-
-        // Check if this slot was visited before this step
         for (int s = 0; s < step; s++)
             if (_visitOrder[s] == slot) return texDoneColour;
-
-        // Active slot at this step
         if (_visitOrder[step] == slot) return texActiveColour;
-
         return texTargetColour;
     }
 
@@ -1208,7 +1173,6 @@ public class FittsLawTask : Goal
         _cachedTextures = null;
     }
 
-    // Edit-mode preview (lightweight — single texture, not cached array)
     private void RegenerateEditorPreview()
     {
         if (Application.isPlaying) return;
@@ -1282,14 +1246,6 @@ public class FittsLawTask : Goal
         }
     }
 
-    /// <summary>
-    /// Draws a smooth label centred inside the target circle.
-    ///
-    /// Sizing: the glyph block is scaled so its total width fits within
-    /// 58% of the target *diameter* (i.e. 58% of 2*targetRadius).
-    /// A super-sampling factor of 4 gives sub-pixel smooth edges before
-    /// downsampling into the final pixel grid, avoiding blocky aliasing.
-    /// </summary>
     private static void DrawLabel(Color32[] pixels, int size,
                                    Vector2 centre, string text, float targetRadius)
     {
@@ -1298,24 +1254,19 @@ public class FittsLawTask : Goal
         int   numChars  = text.Length;
         float diameter  = targetRadius * 2f;
 
-        // Each glyph is 5 wide × 7 tall (with a 1-column inter-glyph gap).
-        // Total glyph columns: numChars*5 + (numChars-1)*1 = numChars*6 - 1
         const int GW = 5, GH = 7, GAP = 1;
         float cols = numChars * GW + (numChars - 1) * GAP;
 
-        // Scale so the full text block is 58% of the diameter.
-        // Use a sub-pixel float scale for smooth placement.
         float scale = (diameter * 0.58f) / cols;
-        if (scale < 0.5f) return;   // too small to draw anything useful
+        if (scale < 0.5f) return;
 
-        int SS = 4; // super-sample factor (4×4 per output pixel)
+        int SS = 4;
 
         float blockW = cols  * scale;
         float blockH = GH    * scale;
         float ox     = centre.x - blockW * 0.5f;
         float oy     = centre.y - blockH * 0.5f;
 
-        // Bounding box of pixels to touch (with margin)
         int x0 = Mathf.Max(0,    (int)(centre.x - targetRadius));
         int x1 = Mathf.Min(size, (int)(centre.x + targetRadius) + 1);
         int y0 = Mathf.Max(0,    (int)(centre.y - targetRadius));
@@ -1328,11 +1279,9 @@ public class FittsLawTask : Goal
         for (int py = y0; py < y1; py++)
         for (int px = x0; px < x1; px++)
         {
-            // Only process pixels inside the target circle
             float cdx = px - centre.x, cdy = py - centre.y;
             if (cdx * cdx + cdy * cdy > r2) continue;
 
-            // Super-sample: accumulate coverage
             float coverage = 0f;
             for (int sy = 0; sy < SS; sy++)
             for (int sx = 0; sx < SS; sx++)
@@ -1340,13 +1289,11 @@ public class FittsLawTask : Goal
                 float fx = px + (sx + 0.5f) * ssInv;
                 float fy = py + (sy + 0.5f) * ssInv;
 
-                // Map sample into glyph-block space
                 float bx = (fx - ox) / scale;
                 float by = (fy - oy) / scale;
 
                 if (bx < 0 || by < 0 || by >= GH) continue;
 
-                // Which character?
                 float charSlot = bx / (GW + GAP);
                 int   ci       = (int)charSlot;
                 if (ci < 0 || ci >= numChars) continue;
@@ -1366,13 +1313,11 @@ public class FittsLawTask : Goal
 
             if (coverage <= 0f) continue;
 
-            // Blend white label over existing pixel
-            int   idx  = py * size + px;
-            Color32 src = pixels[idx];
-            byte  a    = (byte)(coverage * 230f); // max alpha ~230 for slightly soft look
-            // Alpha-composite white over existing colour
-            float af = a / 255f;
-            pixels[idx] = new Color32(
+            int     idx  = py * size + px;
+            Color32 src  = pixels[idx];
+            byte    a    = (byte)(coverage * 230f);
+            float   af   = a / 255f;
+            pixels[idx]  = new Color32(
                 (byte)(src.r + (255 - src.r) * af),
                 (byte)(src.g + (255 - src.g) * af),
                 (byte)(src.b + (255 - src.b) * af),
@@ -1381,8 +1326,6 @@ public class FittsLawTask : Goal
         }
     }
 
-    // 5-wide × 7-tall bitmaps for digits 0–9.
-    // Each int encodes one row; bit 4 (MSB) = leftmost column.
     private static int[] GetCharBitmap(char c)
     {
         switch (c)
@@ -1471,8 +1414,7 @@ public class FittsLawTask : Goal
 
         for (int slot = 0; slot < numTargets; slot++)
         {
-            int  label    = (_slotLabel != null) ? _slotLabel[slot] : (slot + 1);
-            // Step index this slot sits at in the visit sequence
+            int  label     = (_slotLabel != null) ? _slotLabel[slot] : (slot + 1);
             int  visitStep = -1;
             for (int s = 0; s < _visitOrder.Length; s++)
                 if (_visitOrder[s] == slot) { visitStep = s; break; }
@@ -1494,7 +1436,6 @@ public class FittsLawTask : Goal
             Gizmos.DrawWireSphere(_targetPositions3D[slot], sphereRadius);
 
 #if UNITY_EDITOR
-            // "T1  #1" means: this circle is labelled T1 and is visited 1st
             string gizLabel = visitStep >= 0
                 ? $"T{label}\n#{visitStep + 1}"
                 : $"T{label}";
@@ -1545,7 +1486,6 @@ public class FittsLawTask : Goal
     //  Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>True if the given 0-based slot has already been visited this task.</summary>
     private bool IsSlotDone(int slot)
     {
         if (_visitOrder == null) return false;
@@ -1558,12 +1498,6 @@ public class FittsLawTask : Goal
     //  Public API
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Called by SequentialGoalTrial (or any other scene manager) to make this
-    /// goal the current active one.  Enables the GameObject, resets the task,
-    /// and begins waiting for the user to settle on T1.
-    /// Has no effect when managedBySceneManager is false.
-    /// </summary>
     public void Activate()
     {
         if (!managedBySceneManager) return;
@@ -1575,7 +1509,6 @@ public class FittsLawTask : Goal
         ResetTask();
     }
 
-    /// <summary>Restart the task from the beginning.</summary>
     public void RestartTask()
     {
         RebuildLayout();
@@ -1583,13 +1516,9 @@ public class FittsLawTask : Goal
         EnsureDotIndicator();
     }
 
-    /// <summary>True once every target in the sequence has been successfully dwelled upon.</summary>
     public bool IsTaskComplete => _taskComplete;
-
-    /// <summary>Shannon Fitts' ID for the current layout (bits).</summary>
     public float FittsID => _fittsID;
 
-    /// <summary>Returns a copy of all recorded movement data.</summary>
     public List<(int fromLabel, int toLabel, float duration, float ampPx, float fittsID,
                   Vector3 settle3D, Vector2 settlePlane,
                   List<Vector3> traj3D, List<Vector2> trajPlane)> GetRecords()
@@ -1605,7 +1534,7 @@ public class FittsLawTask : Goal
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Custom Inspector  (compiled in editor only — no separate editor script needed)
+//  Custom Inspector
 // ─────────────────────────────────────────────────────────────────────────────
 #if UNITY_EDITOR
 [UnityEditor.CustomEditor(typeof(FittsLawTask))]
@@ -1616,6 +1545,20 @@ public class FittsLawTaskEditor : UnityEditor.Editor
         DrawDefaultInspector();
 
         FittsLawTask task = (FittsLawTask)target;
+
+        UnityEditor.EditorGUILayout.Space(6);
+        UnityEditor.EditorGUILayout.LabelField("Sheet Print Command", UnityEditor.EditorStyles.boldLabel);
+
+        UnityEditor.EditorGUILayout.HelpBox(
+            "Sheet size is derived from the Plane's world lossy scale " +
+            "(lossyScale.x × 10 000 mm).  Changes live as you move or re-parent the object.",
+            UnityEditor.MessageType.None);
+
+        if (GUILayout.Button("Copy Command to Clipboard", GUILayout.Height(26)))
+        {
+            GUIUtility.systemCopyBuffer = task._printSheetCommand;
+            Debug.Log("[FittsLawTask] Print command copied to clipboard:\n" + task._printSheetCommand);
+        }
 
         UnityEditor.EditorGUILayout.Space(10);
         UnityEditor.EditorGUILayout.LabelField("Texture Baking", UnityEditor.EditorStyles.boldLabel);

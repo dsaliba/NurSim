@@ -278,6 +278,7 @@ MonoBehaviour:
   - 
   - Unity200A Fitts Robot
   - Unity200A Fitts
+  - Unity200A Fitts Twin
   interfaces:
   - name: None
     prefab: {fileID: 0}
@@ -293,9 +294,18 @@ MonoBehaviour:
   - Side
   mappingFileOptions:
   - displayName: Joystick
-    filePath: /catkin_ws/joystick_mapping.json
+    filePath: /home/fetch/catkin_workspaces/iona_devel_ws/joystick_mapping.json
   - displayName: Pose
-    filePath: /catkin_ws/pose_mapping.json
+    filePath: /home/fetch/catkin_workspaces/iona_devel_ws/pose_mapping.json
+  presetPoseOptions:
+  - displayName: Home
+    serviceName: home_pose
+  - displayName: Narrow
+    serviceName: narrow_pose
+  - displayName: Side
+    serviceName: side_pose
+  rightArmName: right_arm
+  leftArmName: left_arm
   loadOnStart: 1
 --- !u!4 &791946144
 Transform:

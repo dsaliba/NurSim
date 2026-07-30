@@ -60,47 +60,57 @@ public class MoveAncestorToMatchTarget : MonoBehaviour
     }
 
     private void MoveToMatchTarget()
+{
+    if (objectToMove == null)
     {
-        if (objectToMove == null)
-        {
-            Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': objectToMove is not assigned.");
-            return;
-        }
-
-        if (targetTransform == null)
-        {
-            Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': targetTransform is not assigned.");
-            return;
-        }
-
-        // Pure position-only math — rotation is never read or written here, on either
-        // this transform, objectToMove, or targetTransform.
-        //
-        // Goal: after this call, THIS object's world position == targetTransform's
-        // world position. objectToMove is only the means to get there (it is dragged
-        // along by whatever delta is needed) — objectToMove itself is NOT meant to end
-        // up at targetTransform's position.
-        Vector3 attachedObjectCurrentPos = transform.position;
-        Vector3 targetPos = targetTransform.position;
-        Vector3 worldDelta = targetPos - attachedObjectCurrentPos;
-
-        // Translate objectToMove by worldDelta along world axes. Using Space.World here
-        // is what guarantees rotation is not a factor: the move is the same raw vector
-        // regardless of objectToMove's own rotation or any rotation elsewhere in the
-        // chain between objectToMove and this object.
-        objectToMove.Translate(worldDelta, Space.World);
-
-        // Sanity check: this object (not objectToMove) should now be on target.
-        if ((transform.position - targetPos).sqrMagnitude > 0.0001f)
-        {
-            Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': post-move position does not match target as expected.");
-        }
-
-        if (HTTPDash.Instance != null)
-        {
-            HTTPDash.Instance.SendNotification("Calibration", $"'{name}' calibrated to '{targetTransform.name}'.", "#2e7d32");
-        }
+        Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': objectToMove is not assigned.");
+        return;
     }
+
+    if (targetTransform == null)
+    {
+        Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': targetTransform is not assigned.");
+        return;
+    }
+
+    // TrackedPoseDriver writes the XR device's pose into this transform's LOCAL
+    // position and rotation every frame.  We must NOT touch this transform —
+    // instead we solve for the objectToMove world transform that makes the
+    // tracker's resulting WORLD pose equal to targetTransform's world pose.
+
+    // Current XR device output (TPD-driven local pose relative to objectToMove).
+    Vector3    localPos = transform.localPosition;
+    Quaternion localRot = transform.localRotation;
+
+    // Solve for objectToMove.rotation:
+    //   objectToMove.rotation * localRot == targetTransform.rotation
+    Quaternion newWorldRot = targetTransform.rotation * Quaternion.Inverse(localRot);
+
+    // Solve for objectToMove.position:
+    //   objectToMove.position + objectToMove.rotation * localPos == targetTransform.position
+    Vector3 newWorldPos = targetTransform.position - newWorldRot * localPos;
+
+    objectToMove.SetPositionAndRotation(newWorldPos, newWorldRot);
+
+    // Sanity checks (this transform, not objectToMove, should now match target).
+    float posErr = (transform.position - targetTransform.position).magnitude;
+    float rotErr = Quaternion.Angle(transform.rotation, targetTransform.rotation);
+
+    if (posErr > 0.001f || rotErr > 0.1f)
+    {
+        Debug.LogWarning(
+            $"{nameof(MoveAncestorToMatchTarget)} on '{name}': post-calibration error — " +
+            $"pos {posErr * 100f:F1} cm, rot {rotErr:F2}°. " +
+            $"Check objectToMove has no non-uniform scale.");
+    }
+    else if (HTTPDash.Instance != null)
+    {
+        HTTPDash.Instance.SendNotification(
+            "Calibration",
+            $"'{name}' calibrated to '{targetTransform.name}'. pos err {posErr * 1000f:F1} mm, rot err {rotErr:F2}°.",
+            "#2e7d32");
+    }
+}
 
     private void OnDestroy()
     {

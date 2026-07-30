@@ -9,6 +9,11 @@ public class SenquentialGoalTrial : Trial
 {
     public int currentGoalIndex = -1;
 
+    // Suppresses the "Goal Reached" notification for one OnGoalCompleted call.
+    // Used by RestartSequence so that resetting to index -1 doesn't emit a
+    // spurious "Robot reached goal #-1" notification.
+    private bool suppressNextNotification = false;
+
     public new void Start()
     {
         base.Start();
@@ -26,10 +31,42 @@ public class SenquentialGoalTrial : Trial
         StartTrial();
     }
 
+    /// <summary>
+    /// Resets the sequential goal sequence to start from goals[0] of the
+    /// current (possibly reordered) goals list. Call this after TaskEnvironment
+    /// has updated objectMap with a new goal order and disabled all goals.
+    ///
+    /// Unsubscribes the currently active goal's onComplete callback so that a
+    /// stale completion event cannot corrupt the fresh sequence.
+    /// </summary>
+    public void RestartSequence()
+    {
+        GameObject[] goals = base.environment.getObjectListByKey("goals");
+
+        // Unsubscribe from the currently active goal before resetting.
+        if (currentGoalIndex >= 0 && currentGoalIndex < goals.Length && goals[currentGoalIndex] != null)
+        {
+            TrialGoal current = goals[currentGoalIndex].GetComponent<TrialGoal>();
+            if (current != null)
+                current.onComplete -= OnGoalCompleted;
+
+            goals[currentGoalIndex].SetActive(false);
+        }
+
+        // Suppress the notification that OnGoalCompleted would fire for index -1.
+        suppressNextNotification = true;
+        currentGoalIndex = -1;
+        OnGoalCompleted();
+    }
+
     public void OnGoalCompleted()
     {
-        HTTPDash.Instance.SendNotification(
-            "Goal Reached", "Robot reached goal #" + currentGoalIndex, "green");
+        if (!suppressNextNotification)
+        {
+            HTTPDash.Instance.SendNotification(
+                "Goal Reached", "Robot reached goal #" + currentGoalIndex, "green");
+        }
+        suppressNextNotification = false;
 
         GameObject[] goals = base.environment.getObjectListByKey("goals");
 
