@@ -352,7 +352,7 @@ public class HTTPDash : MonoBehaviour
             string fieldsJson = string.Join(",", fields.Select(f =>
             {
                 string optsPart = f.options != null
-                    ? $",\"options\":[{string.Join(",", f.options.Select(o => $"\"{Esc(o)}\""))}]"
+                    ? $",\"options\":[{string.Join(",", f.options.Select(o => $"\"{Esc(o)}\""  ))}]"
                     : "";
                 string placeholderPart = f.placeholder != null
                     ? $",\"placeholder\":\"{Esc(f.placeholder)}\""
@@ -378,6 +378,86 @@ public class HTTPDash : MonoBehaviour
                 }
             }
             multiCallback?.Invoke(dict);
+        }
+    }
+
+    // ── Slider card ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A card that displays a range slider snapping between evenly-spaced tick marks.
+    /// The current value is shown live; pressing the primary button POSTs the value to Unity.
+    /// Optionally a secondary "save" button can be shown in the same card — it POSTs the
+    /// current slider value prefixed with "save:" so Invoke() can dispatch to saveCallback.
+    /// </summary>
+    [System.Serializable]
+    public class SliderCard : HTMLDashCard
+    {
+        public string title;
+        public string buttonText;
+        public string saveButtonText; // null = no secondary save button
+        public float min;
+        public float max;
+        public float step;
+        public float defaultValue;
+        public Action<float> callback;
+        public Action<float> saveCallback; // optional; fired by the secondary button
+
+        public SliderCard(
+            string title, string buttonText,
+            float min, float max, float step, float defaultValue,
+            Action<float> callback,
+            string saveButtonText = null, Action<float> saveCallback = null)
+        {
+            this.id = HTMLDashCard.nextID++;
+            this.title = title;
+            this.buttonText = buttonText;
+            this.saveButtonText = saveButtonText;
+            this.min = min;
+            this.max = max;
+            this.step = step;
+            this.defaultValue = defaultValue;
+            this.callback = callback;
+            this.saveCallback = saveCallback;
+        }
+
+        // Use InvariantCulture so floats always serialise with '.' not ','
+        private static string F(float f) =>
+            f.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        public override string AsJson()
+        {
+            string json =
+                $"{{\"type\":\"slider\",\"id\":{id},\"title\":\"{Esc(title)}\",\"buttonText\":\"{Esc(buttonText)}\"" +
+                $",\"min\":{F(min)},\"max\":{F(max)},\"step\":{F(step)},\"defaultValue\":{F(defaultValue)}";
+            if (!string.IsNullOrEmpty(saveButtonText))
+                json += $",\"saveButtonText\":\"{Esc(saveButtonText)}\"";
+            json += "}";
+            return json;
+        }
+
+        public override void Invoke(string rawBody)
+        {
+            if (rawBody != null && rawBody.StartsWith("save:"))
+            {
+                string valStr = rawBody.Substring(5);
+                if (float.TryParse(valStr,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out float val))
+                    saveCallback?.Invoke(val);
+                else
+                    Debug.LogWarning($"SliderCard '{title}': could not parse save value '{valStr}'");
+            }
+            else
+            {
+                if (float.TryParse(rawBody,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out float val))
+                    callback?.Invoke(val);
+                else
+                    Debug.LogWarning($"SliderCard '{title}': could not parse value '{rawBody}'");
+            }
         }
     }
 
@@ -552,6 +632,22 @@ public class HTTPDash : MonoBehaviour
     }
 
     /// <summary>
+    /// Register a tick-snapping slider card.
+    /// </summary>
+    public SliderCard RegisterSlider(
+        string title, string buttonText,
+        float min, float max, float step, float defaultValue,
+        Action<float> callback,
+        string saveButtonText = null, Action<float> saveCallback = null)
+    {
+        var card = new SliderCard(title, buttonText, min, max, step, defaultValue,
+                                  callback, saveButtonText, saveCallback);
+        lock (cardsLock) { cards.Add(card); }
+        BumpCardsVersionAndFlush();
+        return card;
+    }
+
+    /// <summary>
     /// Call after mutating a card object in place to re-publish the cards channel.
     /// </summary>
     public void NotifyCardsChanged() => BumpCardsVersionAndFlush();
@@ -579,620 +675,1037 @@ public class HTTPDash : MonoBehaviour
     private string GenerateDashboardHtml()
     {
         return @"<!DOCTYPE html>
-<html>
+<html data-theme='light'>
 <head>
-  <meta charset=""UTF-8"" />
+  <meta charset='UTF-8' />
   <title>NurSim Unity Dashboard</title>
   <style>
+    :root {
+      --bg:            #E8E8EC;
+      --surface:       #FFFFFF;
+      --raised:        #F2F2F5;
+      --border:        rgba(0,0,0,0.09);
+      --border-mid:    rgba(0,0,0,0.14);
+      --text:          #18181B;
+      --text-2:        #52525B;
+      --accent:        #B91C3A;
+      --accent-h:      #941529;
+      --accent-glow:   rgba(185,28,58,0.10);
+      --success:       #166534;
+      --header-bg:     #FFFFFF;
+    }
+    [data-theme='dark'] {
+      --bg:            #141416;
+      --surface:       #1E1E22;
+      --raised:        #28282E;
+      --border:        rgba(255,255,255,0.06);
+      --border-mid:    rgba(255,255,255,0.11);
+      --text:          #E2E2E6;
+      --text-2:        #9494A2;
+      --accent:        #C4364F;
+      --accent-h:      #A82B41;
+      --accent-glow:   rgba(196,54,79,0.13);
+      --success:       #2D6A46;
+      --header-bg:     #1E1E22;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      margin: 0;
-      font-family: ""Segoe UI"", Tahoma, Geneva, Verdana, sans-serif;
-      background: #f7f7f7;
-      color: #333;
+      font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      background: var(--bg);
+      color: var(--text);
       height: 100vh;
       display: flex;
       flex-direction: column;
+      overflow: hidden;
+      transition: background 0.22s, color 0.22s;
     }
+
+    /* ── Header ─────────────────────────────── */
     header {
       display: flex;
       align-items: center;
-      padding: 1em 2em;
-      background: white;
-      border-bottom: 2px solid crimson;
+      height: 50px;
+      padding: 0 1.1rem;
+      gap: 0.75rem;
+      background: var(--header-bg);
+      border-bottom: 1px solid var(--border-mid);
+      flex-shrink: 0;
+      transition: background 0.22s, border-color 0.22s;
     }
-    header img { height: 40px; margin-right: 1em; }
-    header h1 { font-size: 1.5em; margin: 0; }
+    .logo-wrap {
+      display: flex; align-items: center;
+      background: #fff; border-radius: 5px; padding: 2px 7px; flex-shrink: 0;
+    }
+    [data-theme='light'] .logo-wrap { background: transparent; padding: 0; }
+    header img { height: 25px; display: block; }
+    .h-title {
+      flex: 1; font-size: 0.88em; font-weight: 600;
+      color: var(--text); letter-spacing: -0.01em;
+    }
+    .h-tag {
+      font-size: 0.67em; font-weight: 500; color: var(--text-2);
+      background: var(--raised); border: 1px solid var(--border-mid);
+      border-radius: 4px; padding: 0.18em 0.52em;
+    }
+    .theme-btn {
+      width: 30px; height: 30px; border-radius: 5px;
+      border: 1px solid var(--border-mid); background: transparent;
+      color: var(--text-2); cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.85em; transition: background 0.12s, color 0.12s;
+    }
+    .theme-btn:hover { background: var(--raised); color: var(--text); }
 
-    .main-content { display: flex; flex: 1; overflow: hidden; }
+    /* ── Shell ───────────────────────────────── */
+    .shell { display: flex; flex: 1; overflow: hidden; }
+    .col {
+      display: flex; flex-direction: column; overflow: hidden;
+      border-right: 1px solid var(--border-mid); transition: border-color 0.22s;
+    }
+    .col:last-child { border-right: none; }
+    .col-controls      { flex: 1 1 0; min-width: 240px; }
+    .col-recording     { flex: 0 0 295px; }
+    .col-notifications { flex: 0 0 245px; }
 
-    .panel-column {
-      flex: 1 1 0;
+    /* ── Column header ───────────────────────── */
+    .col-head {
+      height: 36px; padding: 0 0.55rem 0 0.9rem;
+      display: flex; align-items: center; gap: 0.35rem;
+      background: var(--raised); border-bottom: 1px solid var(--border-mid);
+      flex-shrink: 0; transition: background 0.22s;
+    }
+    .col-label {
+      font-size: 0.66em; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-2);
+    }
+    .badge {
+      margin-left: auto; font-size: 0.62em; font-weight: 700;
+      background: var(--accent); color: #fff; border-radius: 99px;
+      padding: 0.12em 0.48em; display: none;
+    }
+
+    /* ── Grid column-count picker ────────────── */
+    .gcol-picker {
+      display: flex; gap: 2px; margin-left: auto;
+    }
+    .gcol-btn {
+      width: 21px; height: 21px;
+      font-size: 0.7em; font-weight: 600; font-family: inherit;
+      border: 1px solid var(--border-mid); border-radius: 3px;
+      background: transparent; color: var(--text-2); cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.1s, color 0.1s, border-color 0.1s;
+    }
+    .gcol-btn:hover { background: var(--raised); color: var(--text); }
+    .gcol-btn.active {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+
+    /* ── Grid resize ruler ───────────────────── */
+    /*  A thin bar between the col-head and the grid.
+        Column boundaries appear as draggable handles.        */
+    .grid-ruler {
+      height: 9px; flex-shrink: 0;
+      background: var(--raised);
+      border-bottom: 1px solid var(--border-mid);
+      position: relative; overflow: visible;
+      transition: background 0.22s;
+    }
+    /* Each handle sits at a column boundary */
+    .ruler-handle {
+      position: absolute; top: -2px;
+      height: calc(100% + 4px);
+      width: 11px; margin-left: -5.5px;
+      cursor: col-resize; z-index: 10;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .ruler-handle::after {
+      content: '';
+      width: 2px; height: 100%;
+      background: var(--border-mid); border-radius: 1px;
+      transition: width 0.1s, background 0.1s;
+    }
+    .ruler-handle:hover::after,
+    .ruler-handle.resizing::after {
+      width: 3px; background: var(--accent);
+    }
+
+    /* ── Controls grid ───────────────────────── */
+    .ctrl-list {
+      flex: 1; overflow-y: auto;
+      display: grid;
+      /* columns set dynamically via .style.gridTemplateColumns */
+      align-content: start;
+      gap: 1px;
+      background: var(--border-mid);
+      transition: background 0.22s;
+    }
+    .ctrl-list::-webkit-scrollbar { width: 4px; }
+    .ctrl-list::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 2px; }
+
+    /* Every card is a single grid cell */
+    .ctrl-row {
+      background: var(--surface);
+      padding: 0.68rem 0.78rem 0.72rem;
+      position: relative;
+      transition: background 0.1s;
       min-width: 0;
-      overflow-y: auto;
-      box-sizing: border-box;
-      border-right: 1px solid #ddd;
     }
-    .panel-column:last-of-type { border-right: none; }
-    .panel-column h2.column-title {
-      margin: 0;
-      padding: 0.9em 1.5em;
-      background: white;
-      border-bottom: 1px solid #ddd;
-      color: crimson;
-      font-size: 1.1em;
-      position: sticky;
-      top: 0;
+    .ctrl-row.row-dragging { opacity: 0.28; }
+    .ctrl-row.row-over {
+      outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1;
     }
 
-    .card-container {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1em;
-      padding: 1.5em;
-      align-content: flex-start;
-      box-sizing: border-box;
+    /* Drag handle — top-right corner, reveals on hover */
+    .row-drag {
+      position: absolute; top: 6px; right: 7px;
+      cursor: grab; color: var(--text-2); opacity: 0;
+      transition: opacity 0.12s; font-size: 0.82em; line-height: 1;
+      padding: 2px 3px; border-radius: 3px; user-select: none;
     }
-    .card {
-      background: white;
-      border: 1px solid #ccc;
-      padding: 1em;
-      border-radius: 8px;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-      transition: transform 0.1s ease;
-      max-width: 300px;
-      max-height: 200px;
-      flex: 1 1 auto;
-      box-sizing: border-box;
-    }
-    .card.multifield { max-height: none; }
-    .card.dragorder  { max-height: none; max-width: 360px; }
-    .card:hover { transform: translateY(-2px); }
-    .card h2 { margin-top: 0; color: crimson; }
-    .card label { display: block; margin-top: 0.6em; font-size: 0.8em; color: #777; }
-    .card input, .card select, .card button {
-      width: 100%;
-      padding: 0.6em;
-      margin-top: 0.3em;
-      font-size: 1em;
-      border-radius: 6px;
-      border: 1px solid #bbb;
-      box-sizing: border-box;
-    }
-    .card input:focus, .card select:focus {
-      outline: none;
-      border-color: crimson;
-      box-shadow: 0 0 0 2px rgba(220, 20, 60, 0.2);
-    }
-    .card button {
-      background: crimson;
-      color: white;
-      border: none;
-      cursor: pointer;
-      transition: background 0.3s ease;
-      margin-top: 0.8em;
-    }
-    .card button:hover { background: #a4161a; }
+    .ctrl-row:hover .row-drag { opacity: 0.45; }
+    .row-drag:active { cursor: grabbing; opacity: 0.9 !important; }
 
-    /* ── Drag-order list ── */
-    .drag-list {
-      list-style: none;
-      padding: 0;
-      margin: 0.5em 0 0;
+    /* Card label (compact uppercase) */
+    .row-title {
+      font-size: 0.7em; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2);
+      margin-bottom: 0.4rem; line-height: 1.3;
+      padding-right: 1.4rem; /* room for drag handle */
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
+
+    /* ── Shared form controls ─────────────────── */
+    input[type='text'], select {
+      width: 100%; padding: 0.44em 0.6em; font-size: 0.875em;
+      font-family: inherit; color: var(--text);
+      background: var(--raised); border: 1px solid var(--border-mid);
+      border-radius: 5px; outline: none;
+      -webkit-appearance: none; appearance: none;
+      transition: border-color 0.12s, box-shadow 0.12s, background 0.22s, color 0.22s;
+    }
+    input[type='text']:focus, select:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow);
+    }
+    select {
+      background-image: url(""data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='5'%3E%3Cpath d='M0 0l4.5 5L9 0z' fill='%23888'/%3E%3C/svg%3E"");
+      background-repeat: no-repeat; background-position: right 0.62em center;
+      padding-right: 1.75em; cursor: pointer;
+    }
+
+    .btn {
+      display: block; width: 100%; margin-top: 0.48rem;
+      padding: 0.44em 0.85em; font-size: 0.82em; font-weight: 600;
+      font-family: inherit; border: none; border-radius: 5px; cursor: pointer;
+      transition: background 0.12s, filter 0.12s, transform 0.07s;
+    }
+    .btn:active { transform: scale(0.975); }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-h); }
+    .btn-ghost {
+      background: transparent; color: var(--text-2);
+      border: 1px solid var(--border-mid); margin-top: 0.28rem;
+    }
+    .btn-ghost:hover { background: var(--raised); color: var(--text); }
+
+    /* Sub-labels inside multi-field cards */
+    .row-lbl {
+      display: block; font-size: 0.78em; font-weight: 500; color: var(--text-2);
+      margin-top: 0.48rem; margin-bottom: 0.18rem;
+    }
+    .row-lbl:first-of-type { margin-top: 0; }
+
+    /* ── Slider ──────────────────────────────── */
+    .slider-val {
+      font-size: 1.28em; font-weight: 700; color: var(--accent);
+      letter-spacing: -0.02em; line-height: 1; display: block;
+      margin-bottom: 0.05rem;
+    }
+    input[type='range'] {
+      -webkit-appearance: none; appearance: none;
+      width: 100%; height: 3px; border-radius: 2px;
+      background: var(--border-mid); border: none; padding: 0;
+      outline: none; cursor: pointer; margin: 0.38rem 0 0.12rem;
+      transition: background 0.22s;
+    }
+    input[type='range']::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 15px; height: 15px; border-radius: 50%;
+      background: var(--accent); cursor: pointer;
+      border: 2px solid var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,0.22);
+    }
+    input[type='range']::-moz-range-thumb {
+      width: 15px; height: 15px; border-radius: 50%;
+      background: var(--accent); cursor: pointer; border: 2px solid var(--surface);
+    }
+    .slider-ends {
+      display: flex; justify-content: space-between;
+      font-size: 0.69em; color: var(--text-2);
+    }
+
+    /* ── DragOrderCard internal list ─────────── */
+    .drag-list { list-style: none; display: flex; flex-direction: column; gap: 0.2rem; }
     .drag-item {
-      display: flex;
-      align-items: center;
-      gap: 0.5em;
-      padding: 0.45em 0.6em;
-      margin: 0.25em 0;
-      background: #f9f9f9;
-      border: 1px solid #ddd;
-      border-radius: 5px;
-      user-select: none;
-      cursor: default;
-      transition: background 0.1s, border-color 0.1s;
+      display: flex; align-items: center; gap: 0.35rem;
+      padding: 0.32rem 0.42rem;
+      background: var(--raised); border: 1px solid var(--border);
+      border-radius: 4px; user-select: none;
+      transition: background 0.1s, border-color 0.1s, opacity 0.12s;
     }
-    .drag-item.dragging  { opacity: 0.35; }
-    .drag-item.drag-over { border-color: crimson; background: #fff0f3; }
-    .drag-handle {
-      cursor: grab;
-      color: #bbb;
-      font-size: 1.2em;
-      line-height: 1;
-      flex-shrink: 0;
-    }
+    .drag-item.dragging  { opacity: 0.28; }
+    .drag-item.drag-over { border-color: var(--accent); background: var(--accent-glow); }
+    .drag-handle { cursor: grab; color: var(--text-2); opacity: 0.4; font-size: 0.95em; flex-shrink: 0; }
     .drag-handle:active { cursor: grabbing; }
-    .drag-check {
-      width: auto !important;
-      margin: 0 !important;
-      padding: 0 !important;
-      flex-shrink: 0;
-      cursor: pointer;
-    }
-    .drag-label {
-      flex: 1;
-      font-size: 0.9em;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .drag-index {
-      font-size: 0.75em;
-      color: #bbb;
-      flex-shrink: 0;
-      min-width: 1.2em;
-      text-align: right;
-    }
+    .drag-check  { flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
+    .drag-lbl    { flex: 1; font-size: 0.8em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .drag-idx    { font-size: 0.67em; color: var(--text-2); flex-shrink: 0; min-width: 1.25em; text-align: right; }
 
-    .recording-container { padding: 1.5em; box-sizing: border-box; }
-    .recording-panel {
-      background: white;
-      border: 1px solid #ccc;
-      padding: 1.5em;
-      border-radius: 8px;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-      width: 100%;
-      box-sizing: border-box;
-      margin-bottom: 1.5em;
+    /* ── Recording column ────────────────────── */
+    .rec-scroll { flex: 1; overflow-y: auto; padding: 0.75rem; }
+    .rec-scroll::-webkit-scrollbar { width: 4px; }
+    .rec-scroll::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 2px; }
+    .rec-form {
+      background: var(--surface); border: 1px solid var(--border-mid);
+      border-radius: 7px; overflow: hidden;
+      transition: background 0.22s, border-color 0.22s;
     }
-    .recording-panel h2 { margin-top: 0; color: crimson; }
-    .recording-panel label { display: block; margin-top: 0.8em; font-size: 0.85em; color: #777; }
-    .recording-panel input[type=""text""], .recording-panel select {
-      width: 100%;
-      padding: 0.6em;
-      margin-top: 0.3em;
-      font-size: 1em;
-      border-radius: 6px;
-      border: 1px solid #bbb;
-      box-sizing: border-box;
+    .rec-form-head {
+      padding: 0.55rem 0.8rem; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 0.42rem;
     }
-    .topic-toolbar { display: flex; gap: 0.5em; margin-top: 0.5em; flex-wrap: wrap; }
-    .topic-toolbar button {
-      flex: 1 1 auto;
-      padding: 0.5em;
-      border-radius: 6px;
-      border: 1px solid #bbb;
-      background: #f0f0f0;
-      cursor: pointer;
-      font-size: 0.85em;
+    .rec-form-head h3 { font-size: 0.8em; font-weight: 600; color: var(--text); }
+    .rec-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+    .rec-form-body { padding: 0.7rem 0.8rem; }
+    .topic-row-tools { display: flex; gap: 0.25rem; flex-wrap: wrap; margin-top: 0.25rem; }
+    .chip {
+      flex: 1 1 auto; padding: 0.26em 0.42em;
+      font-size: 0.7em; font-weight: 500; font-family: inherit;
+      border-radius: 4px; border: 1px solid var(--border-mid);
+      background: var(--raised); color: var(--text-2); cursor: pointer;
+      white-space: nowrap; transition: background 0.1s, color 0.1s;
     }
-    .topic-toolbar button:hover { background: #e2e2e2; }
-    .topic-toolbar button.refresh-btn { background: #e8f0ff; border-color: #99b8e8; }
-    .topic-toolbar button.refresh-btn:hover { background: #d6e4ff; }
-    .topic-list {
-      margin-top: 0.5em;
-      max-height: 220px;
-      overflow-y: auto;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      padding: 0.4em;
+    .chip:hover { background: var(--border-mid); color: var(--text); }
+    .chip-accent { color: var(--accent); border-color: var(--accent); }
+    .chip-accent:hover { background: var(--accent-glow); }
+    .topic-box {
+      margin-top: 0.3rem; max-height: 160px; overflow-y: auto;
+      background: var(--raised); border: 1px solid var(--border-mid);
+      border-radius: 5px; transition: background 0.22s;
     }
-    .topic-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5em;
-      padding: 0.3em 0.2em;
-      font-size: 0.9em;
-      border-bottom: 1px solid #f0f0f0;
+    .topic-box::-webkit-scrollbar { width: 3px; }
+    .topic-box::-webkit-scrollbar-thumb { background: var(--border-mid); }
+    .t-row {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.28rem 0.55rem; border-bottom: 1px solid var(--border);
+      cursor: pointer; transition: background 0.1s;
     }
-    .topic-row:last-child { border-bottom: none; }
-    .topic-row input { width: auto; margin: 0; }
-    .topic-type { margin-left: auto; color: #999; font-size: 0.8em; }
-    .topic-empty { padding: 0.6em; color: #999; font-size: 0.85em; font-style: italic; }
-    .recording-buttons { display: flex; gap: 0.8em; margin-top: 1.2em; }
-    .recording-buttons button {
-      flex: 1;
-      padding: 0.8em;
-      border: none;
-      border-radius: 6px;
-      color: white;
-      cursor: pointer;
-      font-size: 1em;
+    .t-row:last-child { border-bottom: none; }
+    .t-row:hover { background: var(--surface); }
+    .t-row input { flex-shrink: 0; accent-color: var(--accent); }
+    .t-name { flex: 1; font-size: 0.79em; font-family: 'SF Mono','Consolas',monospace; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .t-type { font-size: 0.72em; color: var(--text-2); white-space: nowrap; }
+    .t-empty { padding: 0.7rem; color: var(--text-2); font-size: 0.77em; font-style: italic; text-align: center; }
+    .rec-btns { display: flex; gap: 0.35rem; margin-top: 0.55rem; }
+    .rec-btns .btn { flex: 1; margin-top: 0; }
+    .btn-start { background: var(--success); color: #fff; }
+    .btn-start:hover { filter: brightness(1.12); }
+    .btn-stop  { background: var(--accent); color: #fff; }
+    .btn-stop:hover { background: var(--accent-h); }
+    .row-lbl-rec {
+      display: block; font-size: 0.78em; font-weight: 500; color: var(--text-2);
+      margin-top: 0.5rem; margin-bottom: 0.2rem;
     }
-    .start-btn { background: #1a9c4b; }
-    .start-btn:hover { background: #157a3b; }
-    .stop-btn { background: crimson; }
-    .stop-btn:hover { background: #a4161a; }
+    .row-lbl-rec:first-child { margin-top: 0; }
 
-    .notifications-panel {
-      width: 320px;
-      flex: 0 0 320px;
-      background: #fff;
-      border-left: 1px solid #ccc;
-      padding: 1em;
-      overflow-y: auto;
-      box-shadow: -2px 0 6px rgba(0, 0, 0, 0.05);
-      box-sizing: border-box;
+    /* ── Notifications ───────────────────────── */
+    .notif-scroll {
+      flex: 1; overflow-y: auto; padding: 0.65rem;
+      display: flex; flex-direction: column; gap: 0.38rem;
     }
-    .notifications-panel h2 { color: crimson; margin-top: 0; }
-    .notification {
-      margin-bottom: 1em;
-      padding: 1em;
-      border-radius: 6px;
-      color: #fff;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    .notif-scroll::-webkit-scrollbar { width: 4px; }
+    .notif-scroll::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 2px; }
+    .notif-empty {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: var(--text-2); font-size: 0.75em; gap: 0.3rem; opacity: 0.45; text-align: center;
     }
-    .notification h3 { margin: 0 0 0.5em; }
+    .notif-empty-ico { font-size: 1.5em; }
+    .notif-item {
+      border-radius: 6px; padding: 0.55rem 0.65rem; color: #fff;
+      animation: fadeIn 0.18s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .notif-item h3 { font-size: 0.78em; font-weight: 600; margin-bottom: 0.18em; }
+    .notif-item p  { font-size: 0.73em; opacity: 0.83; line-height: 1.4; }
+
+    /* ── Save toast ──────────────────────────── */
+    .save-toast {
+      position: fixed; bottom: 1.1rem; left: 50%;
+      transform: translateX(-50%) translateY(6px);
+      background: var(--text); color: var(--surface);
+      font-size: 0.75em; padding: 0.38em 0.9em;
+      border-radius: 99px; opacity: 0;
+      transition: opacity 0.18s, transform 0.18s;
+      pointer-events: none; z-index: 200;
+    }
+    .save-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   </style>
 </head>
 <body>
   <header>
-    <img src=""https://labs.wpi.edu/hiro/wp-content/uploads/sites/45/2016/03/Hiro_Logo_WPITheme-300x108.png"" alt=""Company Logo"" />
-    <h1>NurSim Unity Dashboard</h1>
+    <div class='logo-wrap'>
+      <img src='https://labs.wpi.edu/hiro/wp-content/uploads/sites/45/2016/03/Hiro_Logo_WPITheme-300x108.png' alt='HIRO Logo' />
+    </div>
+    <span class='h-title'>NurSim Dashboard</span>
+    <span class='h-tag'>Unity</span>
+    <button class='theme-btn' id='themeToggle' title='Toggle dark mode'>&#9790;</button>
   </header>
 
-  <div class=""main-content"">
-    <div class=""panel-column"" style=""flex: 1.2 1 0;"">
-      <h2 class=""column-title"">Controls</h2>
-      <div class=""card-container"" id=""card-container""></div>
+  <div class='shell'>
+    <!-- Controls column -->
+    <div class='col col-controls'>
+      <div class='col-head'>
+        <span class='col-label'>Controls</span>
+        <!-- Column count picker: 1–6, built by JS -->
+        <div class='gcol-picker' id='gcol-picker'></div>
+      </div>
+      <!-- Resize ruler: drag handles at column boundaries -->
+      <div class='grid-ruler' id='grid-ruler'></div>
+      <div class='ctrl-list' id='card-container'></div>
     </div>
-    <div class=""panel-column"" style=""flex: 1 1 0;"">
-      <h2 class=""column-title"">Recording</h2>
-      <div class=""recording-container"" id=""recording-container""></div>
+
+    <!-- Recording column -->
+    <div class='col col-recording'>
+      <div class='col-head'><span class='col-label'>Recording</span></div>
+      <div class='rec-scroll' id='recording-container'></div>
     </div>
-    <div class=""notifications-panel"" id=""notifications-panel"">
-      <h2>Notifications</h2>
+
+    <!-- Notifications column -->
+    <div class='col col-notifications'>
+      <div class='col-head'>
+        <span class='col-label'>Notifications</span>
+        <span class='badge' id='notif-count'>0</span>
+      </div>
+      <div class='notif-scroll' id='notif-list'>
+        <div class='notif-empty' id='notif-empty'>
+          <span class='notif-empty-ico'>&#128276;</span>
+          <span>No notifications yet</span>
+        </div>
+      </div>
     </div>
   </div>
 
+  <!-- Brief confirmation shown after auto-save -->
+  <div class='save-toast' id='save-toast'>Layout saved</div>
+
   <script>
+    // ── Theme ─────────────────────────────────────────────────────────────
+    const html = document.documentElement;
+    const themeBtn = document.getElementById('themeToggle');
+    let isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    function applyTheme() {
+      html.setAttribute('data-theme', isDark ? 'dark' : 'light');
+      themeBtn.innerHTML = isDark ? '&#9728;' : '&#9790;';
+    }
+    applyTheme();
+    themeBtn.addEventListener('click', () => { isDark = !isDark; applyTheme(); });
+
     let recordingTopics = [];
-    let recordingSelected = {}; // cardId -> Set of topic names
+    let recordingSelected = {};
+    let notifCount = 0;
 
-    // ── Drag-order helpers ────────────────────────────────────────────────
+    // ── Cookie helpers ────────────────────────────────────────────────────
+    function gc(name) {
+      const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+      return m ? decodeURIComponent(m[1]) : null;
+    }
+    function sc(name, val) {
+      document.cookie = `${name}=${encodeURIComponent(val)}; max-age=31536000; path=/`;
+    }
 
+    // ── Toast ─────────────────────────────────────────────────────────────
+    let toastTimer = null;
+    function showToast(msg) {
+      const t = document.getElementById('save-toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove('show'), 1600);
+    }
+
+    // ── Grid settings ─────────────────────────────────────────────────────
+    const GRID_KEY = 'httpdash_grid';
+    let gridCols = 3;
+    let gridWidths = [1, 1, 1]; // fr values per column
+
+    function loadGrid() {
+      try {
+        const raw = gc(GRID_KEY);
+        if (raw) {
+          const d = JSON.parse(raw);
+          if (d.cols >= 1 && d.cols <= 6) gridCols = d.cols;
+          if (Array.isArray(d.widths) && d.widths.length === gridCols) {
+            gridWidths = d.widths;
+          } else {
+            gridWidths = Array(gridCols).fill(1);
+          }
+        }
+      } catch(e) { gridWidths = Array(gridCols).fill(1); }
+    }
+
+    function saveGrid() {
+      sc(GRID_KEY, JSON.stringify({ cols: gridCols, widths: gridWidths }));
+      showToast('Layout saved');
+    }
+
+    // Apply column template to the grid and rebuild the ruler
+    function applyGrid() {
+      const container = document.getElementById('card-container');
+      container.style.gridTemplateColumns = gridWidths.map(w => w + 'fr').join(' ');
+      buildRuler();
+      // Sync active state on picker buttons
+      document.querySelectorAll('.gcol-btn').forEach(b => {
+        b.classList.toggle('active', +b.dataset.n === gridCols);
+      });
+    }
+
+    // Change column count
+    function setColCount(n) {
+      gridCols = n;
+      // Keep existing widths for preserved columns; pad new columns with 1
+      const old = gridWidths.slice();
+      gridWidths = Array.from({ length: n }, (_, i) => old[i] !== undefined ? old[i] : 1);
+      // Re-normalise so widths sum to n (prevents extreme proportions after changing count)
+      const sum = gridWidths.reduce((a, b) => a + b, 0);
+      gridWidths = gridWidths.map(w => (w / sum) * n);
+      saveGrid();
+      applyGrid();
+    }
+
+    // Build the column-count picker buttons (1–6)
+    function buildColPicker() {
+      const picker = document.getElementById('gcol-picker');
+      picker.innerHTML = '';
+      for (let n = 1; n <= 6; n++) {
+        const btn = document.createElement('button');
+        btn.className = 'gcol-btn' + (n === gridCols ? ' active' : '');
+        btn.dataset.n = n;
+        btn.textContent = n;
+        btn.title = `${n} column${n > 1 ? 's' : ''}`;
+        btn.onclick = () => setColCount(n);
+        picker.appendChild(btn);
+      }
+    }
+
+    // Build draggable ruler handles at each column boundary
+    function buildRuler() {
+      const ruler = document.getElementById('grid-ruler');
+      ruler.innerHTML = '';
+      if (gridCols <= 1) return;
+
+      const total = gridWidths.reduce((a, b) => a + b, 0);
+      let cumPct = 0;
+      const rulerW = () => ruler.offsetWidth; // live width
+
+      gridWidths.slice(0, -1).forEach((w, i) => {
+        cumPct += w / total;
+        const handle = document.createElement('div');
+        handle.className = 'ruler-handle';
+        handle.style.left = (cumPct * 100) + '%';
+        ruler.appendChild(handle);
+
+        handle.addEventListener('mousedown', e => {
+          e.preventDefault();
+          const startX = e.clientX;
+          const rw = rulerW();
+          const startWidths = [...gridWidths];
+          const frPerPx = total / rw;
+          const minFr = 0.15;
+
+          handle.classList.add('resizing');
+          document.body.style.cursor = 'col-resize';
+          document.body.style.userSelect = 'none';
+
+          function onMove(ev) {
+            const dFr = (ev.clientX - startX) * frPerPx;
+            const newA = startWidths[i] + dFr;
+            const newB = startWidths[i + 1] - dFr;
+            if (newA < minFr || newB < minFr) return;
+
+            gridWidths[i] = newA;
+            gridWidths[i + 1] = newB;
+
+            // Update grid immediately
+            document.getElementById('card-container').style.gridTemplateColumns =
+              gridWidths.map(v => v + 'fr').join(' ');
+
+            // Reposition all handles without full rebuild (perf)
+            const tot2 = gridWidths.reduce((a, b) => a + b, 0);
+            let cum2 = 0;
+            ruler.querySelectorAll('.ruler-handle').forEach((h, hi) => {
+              cum2 += gridWidths[hi] / tot2;
+              h.style.left = (cum2 * 100) + '%';
+            });
+          }
+
+          function onUp() {
+            handle.classList.remove('resizing');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            saveGrid();
+          }
+
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        });
+      });
+    }
+
+    // ── Card order cookie ─────────────────────────────────────────────────
+    const ORDER_KEY = 'httpdash_ctrl_order';
+
+    function getSavedOrder() {
+      try { const r = gc(ORDER_KEY); return r ? JSON.parse(r) : []; } catch(e) { return []; }
+    }
+    function saveCurrentOrder() {
+      const ids = Array.from(
+        document.getElementById('card-container').querySelectorAll('.ctrl-row[data-cid]')
+      ).map(el => +el.dataset.cid);
+      sc(ORDER_KEY, JSON.stringify(ids));
+    }
+    function applyOrder(cards) {
+      const saved = getSavedOrder();
+      if (!saved.length) return cards;
+      const byId = {};
+      cards.forEach(c => { byId[c.id] = c; });
+      const ordered = [];
+      saved.forEach(id => { if (byId[id] !== undefined) { ordered.push(byId[id]); delete byId[id]; } });
+      cards.forEach(c => { if (byId[c.id] !== undefined) ordered.push(c); });
+      return ordered;
+    }
+
+    // ── Row drag-to-reorder (grid-aware) ──────────────────────────────────
+    function initCtrlReorder(container) {
+      let dragged = null, fromHandle = false;
+
+      container.addEventListener('mousedown', e => {
+        fromHandle = !!e.target.closest('.row-drag');
+      });
+      container.addEventListener('dragstart', e => {
+        if (!fromHandle) { e.preventDefault(); return; }
+        dragged = e.target.closest('.ctrl-row[draggable]');
+        if (!dragged) { e.preventDefault(); return; }
+        dragged.classList.add('row-dragging');
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      container.addEventListener('dragend', () => {
+        if (dragged) { dragged.classList.remove('row-dragging'); saveCurrentOrder(); }
+        container.querySelectorAll('.ctrl-row').forEach(el => el.classList.remove('row-over'));
+        dragged = null; fromHandle = false;
+      });
+      container.addEventListener('dragover', e => {
+        e.preventDefault();
+        if (!dragged) return;
+        const target = e.target.closest('.ctrl-row[draggable]');
+        if (!target || target === dragged) return;
+        container.querySelectorAll('.ctrl-row').forEach(el => el.classList.remove('row-over'));
+        target.classList.add('row-over');
+        // 2-D: diagonal split — top-left triangle = before, bottom-right = after
+        const r = target.getBoundingClientRect();
+        const nx = (e.clientX - r.left) / r.width;
+        const ny = (e.clientY - r.top) / r.height;
+        if (nx + ny < 1) container.insertBefore(dragged, target);
+        else container.insertBefore(dragged, target.nextSibling);
+      });
+      container.addEventListener('dragleave', e => {
+        const t = e.target.closest('.ctrl-row');
+        if (t && t !== dragged) t.classList.remove('row-over');
+      });
+    }
+
+    // ── DragOrderCard internal drag ───────────────────────────────────────
     function initDragList(listId) {
       const list = document.getElementById(listId);
       if (!list) return;
       let dragged = null;
-
       list.addEventListener('dragstart', e => {
+        e.stopPropagation(); // don't bubble to row-reorder
         dragged = e.target.closest('.drag-item');
         if (!dragged) return;
-        // Use setTimeout so the 'dragging' class is applied after the
-        // browser captures the drag image.
         setTimeout(() => dragged && dragged.classList.add('dragging'), 0);
       });
-
       list.addEventListener('dragend', () => {
         if (dragged) dragged.classList.remove('dragging');
         list.querySelectorAll('.drag-item').forEach(el => el.classList.remove('drag-over'));
         dragged = null;
-        refreshDragIndices(list);
+        refreshIdx(list);
       });
-
       list.addEventListener('dragover', e => {
         e.preventDefault();
         if (!dragged) return;
-        const target = e.target.closest('.drag-item');
-        if (!target || target === dragged) return;
+        const t = e.target.closest('.drag-item');
+        if (!t || t === dragged) return;
         list.querySelectorAll('.drag-item').forEach(el => el.classList.remove('drag-over'));
-        target.classList.add('drag-over');
-        const rect = target.getBoundingClientRect();
-        if (e.clientY < rect.top + rect.height / 2) {
-          list.insertBefore(dragged, target);
-        } else {
-          list.insertBefore(dragged, target.nextSibling);
-        }
+        t.classList.add('drag-over');
+        const r = t.getBoundingClientRect();
+        if (e.clientY < r.top + r.height / 2) list.insertBefore(dragged, t);
+        else list.insertBefore(dragged, t.nextSibling);
       });
-
       list.addEventListener('dragleave', e => {
-        const target = e.target.closest('.drag-item');
-        if (target && target !== dragged) target.classList.remove('drag-over');
+        const t = e.target.closest('.drag-item');
+        if (t && t !== dragged) t.classList.remove('drag-over');
       });
     }
 
-    function refreshDragIndices(list) {
+    function refreshIdx(list) {
       list.querySelectorAll('.drag-item').forEach((el, i) => {
-        const idx = el.querySelector('.drag-index');
-        if (idx) idx.textContent = (i + 1) + '.';
+        const ix = el.querySelector('.drag-idx');
+        if (ix) ix.textContent = (i + 1) + '.';
       });
     }
-
-    // ── Card rendering ────────────────────────────────────────────────────
-
-    function renderCards(cardList) {
-      renderNormalCards(cardList.filter(c => c.type !== ""recording""));
-      renderRecordingCards(cardList.filter(c => c.type === ""recording""));
+    function stepDec(step) {
+      const s = step.toString(), d = s.indexOf('.');
+      return d < 0 ? 0 : s.length - d - 1;
+    }
+    function snap(v, min, max, step) {
+      const s = Math.round((v - min) / step) * step + min;
+      return Math.min(max, Math.max(min, +s.toFixed(10)));
     }
 
-    function renderNormalCards(cardList) {
-      const container = document.getElementById(""card-container"");
-      container.innerHTML = """";
+    const HANDLE = '<span class=""row-drag"" title=""Drag to reorder"">&#x2807;</span>';
 
-      cardList.forEach((card) => {
-        const div = document.createElement(""div"");
-        div.className = ""card"" +
-          (card.type === ""multifield"" ? "" multifield"" : """") +
-          (card.type === ""dragorder""  ? "" dragorder""  : """");
-        let html = `<h2>${card.title}</h2>`;
+    // ── Render cards ──────────────────────────────────────────────────────
+    function renderCards(list) {
+      renderNormal(list.filter(c => c.type !== 'recording'));
+      renderRecording(list.filter(c => c.type === 'recording'));
+    }
 
-        if (card.type === ""button"") {
-          html += `<button id=""btn-${card.id}"">${card.buttonText}</button>`;
+    function renderNormal(rawList) {
+      const list = applyOrder(rawList);
+      const c = document.getElementById('card-container');
+      c.innerHTML = '';
 
-        } else if (card.type === ""input"") {
-          html += `
-            <input id=""input-${card.id}"" type=""text"" placeholder=""${card.placeHolder}"">
-            <button id=""submit-input-${card.id}"">${card.buttonText}</button>
-          `;
+      list.forEach(card => {
+        const row = document.createElement('div');
+        row.className = 'ctrl-row';
+        row.setAttribute('draggable', 'true');
+        row.dataset.cid = card.id;
 
-        } else if (card.type === ""dropdown"") {
-          const options = card.options.map(opt => `<option value=""${opt}"">${opt}</option>`).join("""");
-          html += `
-            <select id=""select-${card.id}"">${options}</select>
-            <button id=""submit-select-${card.id}"">${card.buttonText}</button>
-          `;
+        let h = '';
 
-        } else if (card.type === ""multifield"") {
+        if (card.type === 'button') {
+          h = `${HANDLE}
+               <div class=""row-title"">${card.title}</div>
+               <button class=""btn btn-primary"" id=""btn-${card.id}"">${card.buttonText}</button>`;
+
+        } else if (card.type === 'input') {
+          h = `${HANDLE}
+               <div class=""row-title"">${card.title}</div>
+               <input id=""inp-${card.id}"" type=""text"" placeholder=""${card.placeHolder}"">
+               <button class=""btn btn-primary"" id=""sub-inp-${card.id}"">${card.buttonText}</button>`;
+
+        } else if (card.type === 'dropdown') {
+          const opts = card.options.map(o => `<option value=""${o}"">${o}</option>`).join('');
+          h = `${HANDLE}
+               <div class=""row-title"">${card.title}</div>
+               <select id=""sel-${card.id}"">${opts}</select>
+               <button class=""btn btn-primary"" id=""sub-sel-${card.id}"">${card.buttonText}</button>`;
+
+        } else if (card.type === 'multifield') {
+          let fields = '';
           card.fields.forEach(f => {
-            if (f.fieldType === ""dropdown"") {
-              const options = f.options.map(opt => `<option value=""${opt}"">${opt}</option>`).join("""");
-              html += `<label>${f.label}</label><select id=""mf-${card.id}-${f.key}"">${options}</select>`;
+            if (f.fieldType === 'dropdown') {
+              const opts = f.options.map(o => `<option value=""${o}"">${o}</option>`).join('');
+              fields += `<span class=""row-lbl"">${f.label}</span>
+                         <select id=""mf-${card.id}-${f.key}"">${opts}</select>`;
             } else {
-              html += `<label>${f.label}</label><input id=""mf-${card.id}-${f.key}"" type=""text"" placeholder=""${f.placeholder || """"}"">`;
+              fields += `<span class=""row-lbl"">${f.label}</span>
+                         <input id=""mf-${card.id}-${f.key}"" type=""text"" placeholder=""${f.placeholder||''}"">`;
             }
           });
-          html += `<button id=""submit-mf-${card.id}"">${card.buttonText}</button>`;
+          h = `${HANDLE}
+               <div class=""row-title"">${card.title}</div>
+               ${fields}
+               <button class=""btn btn-primary"" id=""sub-mf-${card.id}"">${card.buttonText}</button>`;
 
-        } else if (card.type === ""dragorder"") {
-          const itemRows = card.items.map((name, i) => `
+        } else if (card.type === 'dragorder') {
+          const rows = card.items.map((name, i) => `
             <li class=""drag-item"" draggable=""true"" data-name=""${name}"">
               <span class=""drag-handle"">&#x2807;</span>
-              <input type=""checkbox"" class=""drag-check"" checked title=""Enable/disable this goal"">
-              <span class=""drag-label"">${name}</span>
-              <span class=""drag-index"">${i + 1}.</span>
-            </li>`).join("""");
-          html += `<ul id=""draglist-${card.id}"" class=""drag-list"">${itemRows}</ul>`;
-          html += `<button id=""submit-drag-${card.id}"">${card.buttonText}</button>`;
+              <input type=""checkbox"" class=""drag-check"" checked>
+              <span class=""drag-lbl"">${name}</span>
+              <span class=""drag-idx"">${i + 1}.</span>
+            </li>`).join('');
+          h = `${HANDLE}
+               <div class=""row-title"">${card.title}</div>
+               <ul id=""dl-${card.id}"" class=""drag-list"">${rows}</ul>
+               <button class=""btn btn-primary"" id=""sub-dl-${card.id}"">${card.buttonText}</button>`;
+
+        } else if (card.type === 'slider') {
+          const dec = stepDec(card.step);
+          const n = Math.round((card.max - card.min) / card.step) + 1;
+          let ticks = '';
+          for (let i = 0; i < n; i++) {
+            const v = snap(card.min + i * card.step, card.min, card.max, card.step);
+            ticks += `<option value=""${v}""></option>`;
+          }
+          const init = snap(card.defaultValue, card.min, card.max, card.step).toFixed(dec);
+          const save = card.saveButtonText
+            ? `<button class=""btn btn-ghost"" id=""sav-sl-${card.id}"">${card.saveButtonText}</button>` : '';
+          h = `${HANDLE}
+               <div class=""row-title"">${card.title}</div>
+               <span class=""slider-val"" id=""slv-${card.id}"">${init}</span>
+               <datalist id=""tk-${card.id}"">${ticks}</datalist>
+               <input id=""sl-${card.id}"" type=""range"" min=""${card.min}"" max=""${card.max}""
+                      step=""${card.step}"" value=""${card.defaultValue}"" list=""tk-${card.id}"">
+               <div class=""slider-ends"">
+                 <span>${card.min.toFixed(dec)}</span><span>${card.max.toFixed(dec)}</span>
+               </div>
+               <button class=""btn btn-primary"" id=""sub-sl-${card.id}"">${card.buttonText}</button>${save}`;
         }
 
-        div.innerHTML = html;
-        container.appendChild(div);
+        row.innerHTML = h;
+        c.appendChild(row);
 
-        // Wire events
-        if (card.type === ""button"") {
-          document.getElementById(`btn-${card.id}`).addEventListener(""click"", () => {
-            fetch(`/action/${card.id}`, { method: ""POST"", body: card.title });
-          });
+        // Wire interactions
+        if (card.type === 'button') {
+          document.getElementById(`btn-${card.id}`).onclick = () =>
+            fetch(`/action/${card.id}`, { method: 'POST', body: card.title });
 
-        } else if (card.type === ""input"") {
-          document.getElementById(`submit-input-${card.id}`).addEventListener(""click"", () => {
-            const value = document.getElementById(`input-${card.id}`).value;
-            fetch(`/action/${card.id}`, { method: ""POST"", body: value });
-          });
+        } else if (card.type === 'input') {
+          document.getElementById(`sub-inp-${card.id}`).onclick = () =>
+            fetch(`/action/${card.id}`, { method: 'POST',
+              body: document.getElementById(`inp-${card.id}`).value });
 
-        } else if (card.type === ""dropdown"") {
-          document.getElementById(`submit-select-${card.id}`).addEventListener(""click"", () => {
-            const value = document.getElementById(`select-${card.id}`).value;
-            fetch(`/action/${card.id}`, { method: ""POST"", body: value });
-          });
+        } else if (card.type === 'dropdown') {
+          document.getElementById(`sub-sel-${card.id}`).onclick = () =>
+            fetch(`/action/${card.id}`, { method: 'POST',
+              body: document.getElementById(`sel-${card.id}`).value });
 
-        } else if (card.type === ""multifield"") {
-          document.getElementById(`submit-mf-${card.id}`).addEventListener(""click"", () => {
-            const parts = card.fields.map(f => {
-              const el = document.getElementById(`mf-${card.id}-${f.key}`);
-              return `${encodeURIComponent(f.key)}=${encodeURIComponent(el.value)}`;
-            });
-            fetch(`/action/${card.id}`, { method: ""POST"", body: parts.join(""&"") });
-          });
+        } else if (card.type === 'multifield') {
+          document.getElementById(`sub-mf-${card.id}`).onclick = () => {
+            const parts = card.fields.map(f =>
+              `${encodeURIComponent(f.key)}=${encodeURIComponent(
+                document.getElementById(`mf-${card.id}-${f.key}`).value)}`);
+            fetch(`/action/${card.id}`, { method: 'POST', body: parts.join('&') });
+          };
 
-        } else if (card.type === ""dragorder"") {
-          initDragList(`draglist-${card.id}`);
-          document.getElementById(`submit-drag-${card.id}`).addEventListener(""click"", () => {
-            const list = document.getElementById(`draglist-${card.id}`);
-            const items = Array.from(list.querySelectorAll('.drag-item')).map(li => ({
-              name: li.dataset.name,
-              enabled: li.querySelector('.drag-check').checked
-            }));
-            fetch(`/action/${card.id}`, {
-              method: ""POST"",
+        } else if (card.type === 'dragorder') {
+          initDragList(`dl-${card.id}`);
+          document.getElementById(`sub-dl-${card.id}`).onclick = () => {
+            const items = Array.from(document.getElementById(`dl-${card.id}`)
+              .querySelectorAll('.drag-item')).map(li => ({
+                name: li.dataset.name,
+                enabled: li.querySelector('.drag-check').checked }));
+            fetch(`/action/${card.id}`, { method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(items)
-            });
+              body: JSON.stringify(items) });
+          };
+
+        } else if (card.type === 'slider') {
+          const sl = document.getElementById(`sl-${card.id}`);
+          const vl = document.getElementById(`slv-${card.id}`);
+          const dec = stepDec(card.step);
+          sl.addEventListener('input', () => {
+            const s = snap(parseFloat(sl.value), card.min, card.max, card.step);
+            sl.value = s; vl.textContent = s.toFixed(dec);
           });
+          document.getElementById(`sub-sl-${card.id}`).onclick = () => {
+            const s = snap(parseFloat(sl.value), card.min, card.max, card.step);
+            fetch(`/action/${card.id}`, { method: 'POST', body: s.toString() });
+          };
+          if (card.saveButtonText) {
+            document.getElementById(`sav-sl-${card.id}`).onclick = () => {
+              const s = snap(parseFloat(sl.value), card.min, card.max, card.step);
+              fetch(`/action/${card.id}`, { method: 'POST', body: 'save:' + s.toString() });
+            };
+          }
         }
       });
     }
 
-    function renderRecordingCards(cardList) {
-      const container = document.getElementById(""recording-container"");
-      container.innerHTML = """";
-
-      cardList.forEach((card) => {
+    function renderRecording(list) {
+      const c = document.getElementById('recording-container');
+      c.innerHTML = '';
+      list.forEach(card => {
         if (!recordingSelected[card.id]) recordingSelected[card.id] = new Set();
+        const wrap = document.createElement('div');
+        wrap.className = 'rec-form';
 
-        const panel = document.createElement(""div"");
-        panel.className = ""recording-panel"";
-
-        let html = `<h2>${card.title}</h2>`;
-        html += `<label>Participant</label><input id=""rec-participant-${card.id}"" type=""text"" placeholder=""Participant ID"">`;
+        let h = `<div class=""rec-form-head"">
+          <div class=""rec-dot""></div><h3>${card.title}</h3>
+        </div>
+        <div class=""rec-form-body"">
+          <span class=""row-lbl-rec"">Participant</span>
+          <input id=""rp-${card.id}"" type=""text"" placeholder=""Participant ID"">`;
 
         card.conditions.forEach(cond => {
-          const opts = cond.options.map(o => `<option value=""${o}"">${o}</option>`).join("""");
-          html += `<label>${cond.label}</label><select id=""rec-cond-${card.id}-${cond.key}"">${opts}</select>`;
+          const opts = cond.options.map(o => `<option value=""${o}"">${o}</option>`).join('');
+          h += `<span class=""row-lbl-rec"">${cond.label}</span>
+                <select id=""rc-${card.id}-${cond.key}"">${opts}</select>`;
         });
 
-        html += `
-          <label>Topics</label>
-          <div class=""topic-toolbar"">
-            <button class=""refresh-btn"" id=""rec-refresh-${card.id}"">&#x21bb; Refresh Topics</button>
-            <button id=""rec-selall-${card.id}"">Select All</button>
-            <button id=""rec-deselall-${card.id}"">Deselect All</button>
-            <button id=""rec-save-${card.id}"">Save Selection</button>
-            <button id=""rec-load-${card.id}"">Load Selection</button>
+        h += `<span class=""row-lbl-rec"">Topics</span>
+          <div class=""topic-row-tools"">
+            <button class=""chip chip-accent"" id=""rr-${card.id}"">&#8635; Refresh</button>
+            <button class=""chip"" id=""ra-${card.id}"">All</button>
+            <button class=""chip"" id=""rd-${card.id}"">None</button>
+            <button class=""chip"" id=""rs-${card.id}"">Save</button>
+            <button class=""chip"" id=""rl-${card.id}"">Load</button>
           </div>
-          <div class=""topic-list"" id=""rec-topics-${card.id}""></div>
-          <div class=""recording-buttons"">
-            <button class=""start-btn"" id=""rec-start-${card.id}"">Start Recording</button>
-            <button class=""stop-btn"" id=""rec-stop-${card.id}"">Stop Recording</button>
+          <div class=""topic-box"" id=""rt-${card.id}""></div>
+          <div class=""rec-btns"">
+            <button class=""btn btn-start"" id=""rb-start-${card.id}"">&#9654; Start</button>
+            <button class=""btn btn-stop""  id=""rb-stop-${card.id}"">&#9632; Stop</button>
           </div>
-        `;
+        </div>`;
 
-        panel.innerHTML = html;
-        container.appendChild(panel);
+        wrap.innerHTML = h;
+        c.appendChild(wrap);
 
-        document.getElementById(`rec-refresh-${card.id}`).addEventListener(""click"", fetchTopicsNow);
-        document.getElementById(`rec-selall-${card.id}`).addEventListener(""click"", () => {
+        document.getElementById(`rr-${card.id}`).onclick = fetchTopicsNow;
+        document.getElementById(`ra-${card.id}`).onclick = () => {
           recordingTopics.forEach(t => recordingSelected[card.id].add(t.name));
           renderTopicList(card.id);
-        });
-        document.getElementById(`rec-deselall-${card.id}`).addEventListener(""click"", () => {
-          recordingSelected[card.id].clear();
-          renderTopicList(card.id);
-        });
-        document.getElementById(`rec-save-${card.id}`).addEventListener(""click"", () => saveSelection(card.id));
-        document.getElementById(`rec-load-${card.id}`).addEventListener(""click"", () => loadSelection(card.id, false));
-        document.getElementById(`rec-start-${card.id}`).addEventListener(""click"", () => submitRecording(card, ""start""));
-        document.getElementById(`rec-stop-${card.id}`).addEventListener(""click"", () => submitRecording(card, ""stop""));
+        };
+        document.getElementById(`rd-${card.id}`).onclick = () => {
+          recordingSelected[card.id].clear(); renderTopicList(card.id);
+        };
+        document.getElementById(`rs-${card.id}`).onclick = () => saveSel(card.id);
+        document.getElementById(`rl-${card.id}`).onclick = () => loadSel(card.id, false);
+        document.getElementById(`rb-start-${card.id}`).onclick = () => submitRec(card, 'start');
+        document.getElementById(`rb-stop-${card.id}`).onclick  = () => submitRec(card, 'stop');
 
-        loadSelection(card.id, true);
+        loadSel(card.id, true);
         renderTopicList(card.id);
       });
-
-      if (cardList.length > 0) fetchTopicsNow();
+      if (list.length > 0) fetchTopicsNow();
     }
 
     function renderTopicList(cardId) {
-      const el = document.getElementById(`rec-topics-${cardId}`);
+      const el = document.getElementById(`rt-${cardId}`);
       if (!el) return;
-      el.innerHTML = """";
-
-      if (recordingTopics.length === 0) {
-        const empty = document.createElement(""div"");
-        empty.className = ""topic-empty"";
-        empty.textContent = ""No topics received yet. Click Refresh Topics."";
-        el.appendChild(empty);
+      el.innerHTML = '';
+      if (!recordingTopics.length) {
+        el.innerHTML = '<div class=""t-empty"">No topics — click Refresh</div>';
         return;
       }
-
       recordingTopics.forEach(t => {
-        const row = document.createElement(""label"");
-        row.className = ""topic-row"";
-        const checked = recordingSelected[cardId].has(t.name) ? ""checked"" : """";
-        row.innerHTML = `<input type=""checkbox"" ${checked}> ${t.name} <span class=""topic-type"">${t.type}</span>`;
-        row.querySelector(""input"").addEventListener(""change"", (e) => {
+        const row = document.createElement('label');
+        row.className = 't-row';
+        const chk = recordingSelected[cardId].has(t.name) ? 'checked' : '';
+        row.innerHTML = `<input type=""checkbox"" ${chk}><span class=""t-name"">${t.name}</span><span class=""t-type"">${t.type}</span>`;
+        row.querySelector('input').onchange = e => {
           if (e.target.checked) recordingSelected[cardId].add(t.name);
           else recordingSelected[cardId].delete(t.name);
-        });
+        };
         el.appendChild(row);
       });
     }
 
     function fetchTopicsNow() {
-      fetch(""/data/recording-topics?since=-1"")
+      fetch('/data/recording-topics?since=-1')
         .then(r => r.json())
         .then(resp => {
           recordingTopics = (resp.data && resp.data.topics) || [];
-          Object.keys(recordingSelected).forEach(cardId => renderTopicList(cardId));
+          Object.keys(recordingSelected).forEach(id => renderTopicList(id));
         })
-        .catch(err => console.error(""manual topic refresh failed:"", err));
+        .catch(err => console.error('topic refresh:', err));
     }
 
-    function getCookie(name) {
-      const m = document.cookie.match(new RegExp(""(?:^|; )"" + name + ""=([^;]*)""));
-      return m ? decodeURIComponent(m[1]) : null;
-    }
-    function setCookie(name, value) {
-      document.cookie = `${name}=${encodeURIComponent(value)}; max-age=31536000; path=/`;
-    }
-
-    function saveSelection(cardId) {
-      const participant = document.getElementById(`rec-participant-${cardId}`).value;
-      const conditions = {};
-      document.querySelectorAll(`select[id^=""rec-cond-${cardId}-""]`).forEach(sel => {
-        const key = sel.id.replace(`rec-cond-${cardId}-`, """");
-        conditions[key] = sel.value;
+    function saveSel(id) {
+      const p = document.getElementById(`rp-${id}`).value;
+      const conds = {};
+      document.querySelectorAll(`select[id^=""rc-${id}-""]`).forEach(s => {
+        conds[s.id.replace(`rc-${id}-`, '')] = s.value;
       });
-      const data = { participant, conditions, topics: Array.from(recordingSelected[cardId] || []) };
-      setCookie(`iona_rec_${cardId}`, JSON.stringify(data));
+      sc(`iona_rec_${id}`, JSON.stringify({
+        participant: p, conditions: conds,
+        topics: Array.from(recordingSelected[id] || []) }));
     }
-
-    function loadSelection(cardId, silent) {
-      const raw = getCookie(`iona_rec_${cardId}`);
+    function loadSel(id, silent) {
+      const raw = gc(`iona_rec_${id}`);
       if (!raw) return;
       try {
-        const data = JSON.parse(raw);
-        const pInput = document.getElementById(`rec-participant-${cardId}`);
-        if (pInput && data.participant) pInput.value = data.participant;
-
-        Object.keys(data.conditions || {}).forEach(key => {
-          const sel = document.getElementById(`rec-cond-${cardId}-${key}`);
-          if (sel) sel.value = data.conditions[key];
+        const d = JSON.parse(raw);
+        const pi = document.getElementById(`rp-${id}`);
+        if (pi && d.participant) pi.value = d.participant;
+        Object.keys(d.conditions || {}).forEach(k => {
+          const s = document.getElementById(`rc-${id}-${k}`);
+          if (s) s.value = d.conditions[k];
         });
-
-        recordingSelected[cardId] = new Set(data.topics || []);
-        renderTopicList(cardId);
-      } catch (e) {
-        if (!silent) console.error(""Failed to load selection:"", e);
-      }
+        recordingSelected[id] = new Set(d.topics || []);
+        renderTopicList(id);
+      } catch(e) { if (!silent) console.error('load sel:', e); }
     }
-
-    function submitRecording(card, command) {
-      const participant = document.getElementById(`rec-participant-${card.id}`).value;
+    function submitRec(card, command) {
+      const participant = document.getElementById(`rp-${card.id}`).value;
       const conditions = card.conditions.map(c => ({
-        key: c.key,
-        value: document.getElementById(`rec-cond-${card.id}-${c.key}`).value
-      }));
+        key: c.key, value: document.getElementById(`rc-${card.id}-${c.key}`).value }));
       const topics = Array.from(recordingSelected[card.id] || []);
-      const body = JSON.stringify({ command, participant, conditions, topics });
-      fetch(`/action/${card.id}`, { method: ""POST"", body });
+      fetch(`/action/${card.id}`, {
+        method: 'POST',
+        body: JSON.stringify({ command, participant, conditions, topics }) });
     }
 
+    // ── Long-poll loops ───────────────────────────────────────────────────
     function cardsLoop(since) {
       fetch(`/data/cards?since=${since}`)
         .then(r => r.json())
-        .then(resp => {
-          renderCards(resp.data.cards);
-          cardsLoop(resp.version);
-        })
-        .catch(err => {
-          console.error(""cards poll error:"", err);
-          setTimeout(() => cardsLoop(since), 2000);
-        });
+        .then(resp => { renderCards(resp.data.cards); cardsLoop(resp.version); })
+        .catch(err => { console.error('cards poll:', err); setTimeout(() => cardsLoop(since), 2000); });
     }
-
-    function recordingTopicsLoop(since) {
+    function topicsLoop(since) {
       fetch(`/data/recording-topics?since=${since}`)
         .then(r => r.json())
         .then(resp => {
           recordingTopics = (resp.data && resp.data.topics) || [];
-          Object.keys(recordingSelected).forEach(cardId => renderTopicList(cardId));
-          recordingTopicsLoop(resp.version);
+          Object.keys(recordingSelected).forEach(id => renderTopicList(id));
+          topicsLoop(resp.version);
         })
-        .catch(err => {
-          console.error(""recording-topics poll error:"", err);
-          setTimeout(() => recordingTopicsLoop(since), 2000);
-        });
+        .catch(err => { console.error('topics poll:', err); setTimeout(() => topicsLoop(since), 2000); });
+    }
+    function addNotif(title, body, color) {
+      const list = document.getElementById('notif-list');
+      const empty = document.getElementById('notif-empty');
+      if (empty) empty.remove();
+      notifCount++;
+      const ct = document.getElementById('notif-count');
+      ct.style.display = 'inline'; ct.textContent = notifCount;
+      const div = document.createElement('div');
+      div.className = 'notif-item';
+      div.style.background = color || '#444';
+      div.innerHTML = `<h3>${title}</h3><p>${body}</p>`;
+      list.appendChild(div);
+      list.scrollTop = list.scrollHeight;
+    }
+    function notifLoop() {
+      fetch('/wait-for-message')
+        .then(r => r.json())
+        .then(d => { if (d.title && d.body) addNotif(d.title, d.body, d.color); notifLoop(); })
+        .catch(err => { console.error('notif poll:', err); setTimeout(notifLoop, 2000); });
     }
 
-    function addNotification(title, body, color) {
-      const panel = document.getElementById(""notifications-panel"");
-      const notification = document.createElement(""div"");
-      notification.className = ""notification"";
-      notification.style.backgroundColor = color || ""#444"";
-      notification.innerHTML = `<h3>${title}</h3><p>${body}</p>`;
-      panel.appendChild(notification);
-      panel.scrollTop = panel.scrollHeight;
-    }
-
-    function listenForNotifications() {
-      fetch(""/wait-for-message"")
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.title && data.body) addNotification(data.title, data.body, data.color);
-          listenForNotifications();
-        })
-        .catch(err => {
-          console.error(""Notification polling error:"", err);
-          setTimeout(listenForNotifications, 2000);
-        });
-    }
+    // ── Startup ───────────────────────────────────────────────────────────
+    loadGrid();
+    buildColPicker();
+    applyGrid();
+    initCtrlReorder(document.getElementById('card-container'));
 
     cardsLoop(0);
-    recordingTopicsLoop(0);
-    listenForNotifications();
+    topicsLoop(0);
+    notifLoop();
   </script>
 </body>
-</html>";
+</html>
+";
     }
+
 }

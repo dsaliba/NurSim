@@ -10,7 +10,7 @@ public class SenquentialGoalTrial : Trial
     public int currentGoalIndex = -1;
 
     // Suppresses the "Goal Reached" notification for one OnGoalCompleted call.
-    // Used by RestartSequence so that resetting to index -1 doesn't emit a
+    // Used by RestartSequence so resetting to index -1 doesn't emit a
     // spurious "Robot reached goal #-1" notification.
     private bool suppressNextNotification = false;
 
@@ -33,27 +33,27 @@ public class SenquentialGoalTrial : Trial
 
     /// <summary>
     /// Resets the sequential goal sequence to start from goals[0] of the
-    /// current (possibly reordered) goals list. Call this after TaskEnvironment
-    /// has updated objectMap with a new goal order and disabled all goals.
+    /// current (possibly reordered) goals list.
     ///
-    /// Unsubscribes the currently active goal's onComplete callback so that a
-    /// stale completion event cannot corrupt the fresh sequence.
+    /// <paramref name="previousActiveGoal"/> must be the GameObject that was
+    /// active BEFORE TaskEnvironment updated objectMap. It is passed in
+    /// explicitly because by the time this method runs, objectMap contains the
+    /// new order, so looking up goals[currentGoalIndex] would return the wrong
+    /// object and the real active goal's onComplete callback would be left live,
+    /// corrupting the restarted sequence when that goal eventually completes.
     /// </summary>
-    public void RestartSequence()
+    public void RestartSequence(GameObject previousActiveGoal)
     {
-        GameObject[] goals = base.environment.getObjectListByKey("goals");
-
-        // Unsubscribe from the currently active goal before resetting.
-        if (currentGoalIndex >= 0 && currentGoalIndex < goals.Length && goals[currentGoalIndex] != null)
+        // Unsubscribe from the goal that was active in the OLD sequence.
+        if (previousActiveGoal != null)
         {
-            TrialGoal current = goals[currentGoalIndex].GetComponent<TrialGoal>();
+            TrialGoal current = previousActiveGoal.GetComponent<TrialGoal>();
             if (current != null)
                 current.onComplete -= OnGoalCompleted;
 
-            goals[currentGoalIndex].SetActive(false);
+            previousActiveGoal.SetActive(false);
         }
 
-        // Suppress the notification that OnGoalCompleted would fire for index -1.
         suppressNextNotification = true;
         currentGoalIndex = -1;
         OnGoalCompleted();
@@ -101,7 +101,11 @@ public class SenquentialGoalTrial : Trial
         }
 
         // Enable the GameObject, wire completion, then activate.
+        // Guard with -= before += so that reordering a goal back into the
+        // sequence never accumulates duplicate OnGoalCompleted subscriptions,
+        // which would cause the callback to fire multiple times on completion.
         goals[currentGoalIndex].SetActive(true);
+        nextGoal.onComplete -= OnGoalCompleted;
         nextGoal.onComplete += OnGoalCompleted;
         nextGoal.Activate();
 
@@ -116,7 +120,7 @@ public class SenquentialGoalTrial : Trial
 
     public void UpdateDistanceToNextGoal()
     {
-        if (currentGoalIndex >= environment.getObjectListByKey("goals").Length)
+        if (currentGoalIndex < 0 || currentGoalIndex >= environment.getObjectListByKey("goals").Length)
         {
             ros.Publish("trial/distance_to_goal", new Float64Msg(0));
             return;

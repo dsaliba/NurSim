@@ -31,8 +31,8 @@ public class ChestPositionPublisher : MonoBehaviour
     public void PublishTwist(float position, float velocity)
     {
         // Convert to ROS coordinate
-        positionMsg.position = (double) position;
-        positionMsg.velocity = (double) velocity;
+        positionMsg.position = (float) position;
+        positionMsg.speed_fraction = (float) velocity;
 
         ros.Publish(positionTopicName, positionMsg);
     }

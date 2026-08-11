@@ -19,6 +19,13 @@
 //   - Debug.Log is gated behind verboseLogging (default OFF). Turn it on briefly
 //     to diagnose issues, then turn it off for normal operation.
 //   - Search "[Gaze]" in the Console to filter this script's output.
+//
+// SESSION READINESS
+//   ViveEyeTracker calls Debug.LogError (not throw) when the OpenXR session is not
+//   yet established. To avoid those errors triggering Unity's Error Pause on
+//   startup, publishing is deferred by xrSessionStartupDelay seconds (default 3).
+//   If the session is lost mid-session (e.g. HMD disconnects), a backoff prevents
+//   repeated error spam.
 
 using UnityEngine;
 using Unity.Robotics.ROSTCPConnector;
@@ -48,13 +55,26 @@ public class GazeROSPublisher : MonoBehaviour
 
     [Header("Publish Settings")]
     [Tooltip("Target publish rate in Hz.")]
-    [SerializeField] private float publishRateHz = 20f;
+    [SerializeField] private float publishRateHz = 75f;
 
     [Tooltip("Max raycast distance (metres).")]
     [SerializeField] private float maxRaycastDistance = 500f;
 
     [Tooltip("Layer mask for intersection raycast. Restrict to the canvas layer for best performance.")]
     [SerializeField] private LayerMask intersectionLayerMask = ~0;
+
+    [Header("XR Session")]
+    [Tooltip("Seconds to wait after play mode start before attempting to read gaze data. " +
+             "ViveEyeTracker logs a LogError (not a throw) when the OpenXR session isn't ready yet, " +
+             "which triggers Unity's Error Pause. This delay prevents that.")]
+    [SerializeField] private float xrSessionStartupDelay = 3f;
+
+    [Tooltip("After this many consecutive XR_ERROR_SESSION_LOST failures in a row, " +
+             "publishing backs off for xrSessionBackoffSeconds before retrying.")]
+    [SerializeField] private int xrSessionLostBackoffThreshold = 5;
+
+    [Tooltip("How long (seconds) to wait before retrying after hitting the backoff threshold.")]
+    [SerializeField] private float xrSessionBackoffSeconds = 5f;
 
     [Header("Debug")]
     [Tooltip("Draw the gaze ray in the Scene view. Cheap — leave on during development.")]
@@ -115,6 +135,18 @@ public class GazeROSPublisher : MonoBehaviour
     private float lastBoundsLogTime  = -999f;
 
     // -------------------------------------------------------------------------
+    // Session readiness / backoff
+    // -------------------------------------------------------------------------
+    // ViveEyeTracker calls Debug.LogError before returning XR_ERROR_SESSION_LOST,
+    // which triggers Unity's Error Pause. We gate publishing with a startup delay
+    // and back off on repeated failures so we never spam errors mid-session.
+
+    private float sessionReadyTime;       // Time.time value after which we begin publishing
+    private bool  sessionEverReady;       // true once we've had at least one successful read
+    private int   consecutiveFailures;    // resets to 0 on success
+    private float backoffUntil = -1f;    // if > Time.time, we are in backoff
+
+    // -------------------------------------------------------------------------
     // One-shot warning deduplication — so repeated failures don't spam the log
     // -------------------------------------------------------------------------
     private bool warnedGazeFailed;
@@ -138,6 +170,12 @@ public class GazeROSPublisher : MonoBehaviour
 
         publishInterval    = 1f / Mathf.Max(publishRateHz, 1f);
         verboseLogInterval = 1f / Mathf.Max(verboseLogRateHz, 0.1f);
+
+        // Defer publishing until after the XR session has had time to establish.
+        // ViveEyeTracker.GetEyeGazeDataHTC() calls Debug.LogError (not throw) when
+        // m_XrSessionCreated is false — that LogError triggers Error Pause before we
+        // even see the return value. The startup delay prevents calling the API too early.
+        sessionReadyTime = Time.time + xrSessionStartupDelay;
 
         // Pre-allocate the data array and message objects once.
         // rawMsg.data is assigned the same array reference — we mutate the array
@@ -166,15 +204,27 @@ public class GazeROSPublisher : MonoBehaviour
                   $"raw='{gazeRawTopicName}' intersection='{gazeIntersectionTopicName}' " +
                   $"rate={publishRateHz}Hz " +
                   $"spaceRoot={(gazeSpaceRoot != null ? gazeSpaceRoot.name : "none (raw OpenXR space)")} " +
-                  $"colliderBounds={boxCollider.bounds} layer={LayerMask.LayerToName(gameObject.layer)}");
+                  $"colliderBounds={boxCollider.bounds} layer={LayerMask.LayerToName(gameObject.layer)} " +
+                  $"startupDelay={xrSessionStartupDelay}s");
     }
 
     private void Update()
     {
-        if (Time.time - lastPublishTime < publishInterval)
+        float now = Time.time;
+
+        // Gate 1: startup delay — XR session not ready yet.
+        if (now < sessionReadyTime)
             return;
 
-        lastPublishTime = Time.time;
+        // Gate 2: backoff after repeated session-lost failures mid-session.
+        if (now < backoffUntil)
+            return;
+
+        // Gate 3: publish rate throttle.
+        if (now - lastPublishTime < publishInterval)
+            return;
+
+        lastPublishTime = now;
         PublishGazeData();
     }
 
@@ -191,12 +241,27 @@ public class GazeROSPublisher : MonoBehaviour
     {
         // ------------------------------------------------------------------
         // 1. Fetch gaze data from VIVE OpenXR 2.5.1
+        //
+        // IMPORTANT: XR_HTC_eye_tracker.Interop calls ViveEyeTracker internally.
+        // ViveEyeTracker calls Debug.LogError (not throw) when the XR session is
+        // not ready — there is no way to check session state from outside the
+        // library without triggering that error. We rely on the startup delay and
+        // backoff to avoid calling the API when the session isn't established.
         // ------------------------------------------------------------------
         XrSingleEyeGazeDataHTC[]     gazes      = null;
         XrSingleEyePupilDataHTC[]    pupils     = null;
         XrSingleEyeGeometricDataHTC[] geometrics = null;
 
-        bool gazeOk, pupilOk, geometricOk;
+        // ViveEyeTracker calls Debug.LogError (not throw) for hardware/session errors
+        // like XR_ERROR_SESSION_LOST before returning false. There is no public API to
+        // check session readiness without triggering that error. Temporarily disabling
+        // the Unity logger prevents those LogError calls from firing Error Pause.
+        // Logging is always re-enabled in the finally block; we issue our own warnings.
+        bool gazeOk = false, pupilOk = false, geometricOk = false;
+        System.Exception caughtEx = null;
+
+        bool logWasEnabled = Debug.unityLogger.logEnabled;
+        Debug.unityLogger.logEnabled = false;
         try
         {
             gazeOk      = XR_HTC_eye_tracker.Interop.GetEyeGazeData(out gazes);
@@ -205,27 +270,43 @@ public class GazeROSPublisher : MonoBehaviour
         }
         catch (System.Exception ex)
         {
-            // Log once, not every tick
+            caughtEx = ex;
+        }
+        finally
+        {
+            Debug.unityLogger.logEnabled = logWasEnabled;
+        }
+
+        if (caughtEx != null)
+        {
             if (!warnedGazeFailed)
             {
                 warnedGazeFailed = true;
-                Debug.LogWarning($"[Gaze] XR_HTC_eye_tracker.Interop exception: {ex.Message} " +
+                Debug.LogWarning($"[Gaze] XR_HTC_eye_tracker.Interop exception: {caughtEx.Message} " +
                                  "— ensure VIVE XR Eye Tracker is enabled in XR Plug-in Management > OpenXR.");
             }
+            HandleFailure();
             return;
         }
 
         if (!gazeOk || gazes == null || gazes.Length < 2)
         {
-            if (!warnedGazeFailed)
+            // Don't warn until we've had at least one success — the XR session
+            // may still be initialising slightly after our startup delay.
+            if (sessionEverReady && !warnedGazeFailed)
             {
                 warnedGazeFailed = true;
                 Debug.LogWarning("[Gaze] GetEyeGazeData failed — eye tracking not active. " +
                                  "Check device permissions and feature toggle.");
             }
+            HandleFailure();
             return;
         }
-        warnedGazeFailed = false; // reset if it recovers
+
+        // We have valid data — reset failure tracking.
+        sessionEverReady    = true;
+        consecutiveFailures = 0;
+        warnedGazeFailed    = false;
 
         // ------------------------------------------------------------------
         // 2. Unpack gaze poses into world-space origin + direction
@@ -405,6 +486,28 @@ public class GazeROSPublisher : MonoBehaviour
             Debug.Log($"[Gaze] BOUNDS '{gameObject.name}' center={b.center} size={b.size} " +
                       $"layer={LayerMask.LayerToName(gameObject.layer)}({gameObject.layer}) " +
                       $"enabled={boxCollider.enabled} isTrigger={boxCollider.isTrigger}");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Session failure handling
+    // -------------------------------------------------------------------------
+
+    // Called whenever a publish attempt fails (no data, exception, etc.).
+    // After xrSessionLostBackoffThreshold consecutive failures, publishing backs
+    // off for xrSessionBackoffSeconds. This prevents the VIVE library from being
+    // hammered when the session is lost, which would spam LogError every frame.
+    private void HandleFailure()
+    {
+        consecutiveFailures++;
+
+        if (consecutiveFailures >= xrSessionLostBackoffThreshold)
+        {
+            consecutiveFailures = 0;
+            backoffUntil = Time.time + xrSessionBackoffSeconds;
+            Debug.LogWarning($"[Gaze] {xrSessionLostBackoffThreshold} consecutive failures — " +
+                             $"backing off for {xrSessionBackoffSeconds}s before retrying. " +
+                             "If this repeats, check that the HMD is connected and the OpenXR session is active.");
         }
     }
 

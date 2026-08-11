@@ -52,18 +52,11 @@ public class TaskEnvironment : MonoBehaviour
         return new GameObject[] { };
     }
 
-    // Start is called before the first frame update
     void Start()
     {
         RegisterGoalsWithDash();
     }
 
-    /// <summary>
-    /// Reads the "goals" entry from objectMap and registers a drag-order card
-    /// on the HTTPDash so the operator can reorder and enable/disable goals at
-    /// runtime. The callback runs on the Unity main thread via
-    /// UnityMainThreadDispatcher, so it is safe to call GameObject APIs.
-    /// </summary>
     private void RegisterGoalsWithDash()
     {
         if (HTTPDash.Instance == null)
@@ -101,24 +94,45 @@ public class TaskEnvironment : MonoBehaviour
     /// Rules:
     ///   - Unchecked items are excluded from the sequence entirely and set inactive.
     ///   - Checked items form the new ordered sequence, all set inactive upfront.
-    ///   - The sequential trial is then restarted so that it enables goals[0]
-    ///     and wires completion events through its normal OnGoalCompleted flow.
+    ///   - The sequential trial is restarted so OnGoalCompleted enables goals[0]
+    ///     and wires completion events through its normal flow.
+    ///
+    /// IMPORTANT: The currently active goal is captured from the OLD objectMap
+    /// array BEFORE objectMap is updated. This reference is passed into
+    /// RestartSequence so it can unsubscribe the correct onComplete callback.
+    /// If we looked it up inside RestartSequence, objectMap would already be
+    /// updated and goals[currentGoalIndex] would point to the wrong object,
+    /// leaving the real active goal's callback live and corrupting the sequence.
     /// </summary>
     private void ApplyGoalOrder(List<HTTPDash.OrderedItemSubmission> orderedItems)
     {
         if (orderedItems == null || orderedItems.Count == 0) return;
 
-        // Build a lookup from name → GameObject using the current goals list.
-        GameObject[] currentGoals = getObjectListByKey("goals")
+        // Snapshot the current (old) goals array BEFORE any changes.
+        // This is used both to build the lookup map and to find the active goal
+        // by its old index before objectMap is overwritten.
+        GameObject[] oldGoals = getObjectListByKey("goals")
             .Where(g => g != null)
             .ToArray();
 
         var goalsMap = new Dictionary<string, GameObject>();
-        foreach (var g in currentGoals)
+        foreach (var g in oldGoals)
             if (!goalsMap.ContainsKey(g.name))
                 goalsMap[g.name] = g;
 
-        // Disable and drop unchecked items — they are removed from the sequence.
+        // Capture the currently active goal by reference from the OLD array now,
+        // before objectMap is updated. After the update, currentGoalIndex no
+        // longer maps to the same object in the new array.
+        SenquentialGoalTrial seqTrial = trial as SenquentialGoalTrial;
+        GameObject previousActiveGoal = null;
+        if (seqTrial != null
+            && seqTrial.currentGoalIndex >= 0
+            && seqTrial.currentGoalIndex < oldGoals.Length)
+        {
+            previousActiveGoal = oldGoals[seqTrial.currentGoalIndex];
+        }
+
+        // Disable and drop unchecked items — excluded from the sequence.
         foreach (var item in orderedItems.Where(i => !i.enabled))
         {
             if (goalsMap.TryGetValue(item.name, out GameObject go))
@@ -126,8 +140,7 @@ public class TaskEnvironment : MonoBehaviour
         }
 
         // Build the new ordered array from checked items only.
-        // All are set inactive here; RestartSequence → OnGoalCompleted will
-        // enable goals[0] through the trial's normal flow.
+        // All are set inactive; RestartSequence → OnGoalCompleted enables goals[0].
         var newOrder = new List<GameObject>();
         foreach (var item in orderedItems.Where(i => i.enabled))
         {
@@ -142,7 +155,7 @@ public class TaskEnvironment : MonoBehaviour
             newOrder.Add(go);
         }
 
-        // Persist the new ordered, filtered array into objectMap.
+        // Update objectMap with the new ordered, filtered array.
         for (int i = 0; i < objectMap.Length; i++)
         {
             if (objectMap[i].key == "goals")
@@ -152,19 +165,17 @@ public class TaskEnvironment : MonoBehaviour
             }
         }
 
-        // Restart the sequential trial from the new goals[0].
-        // RestartSequence unsubscribes from the old active goal's onComplete so
-        // its stale callback cannot corrupt the fresh sequence, then advances
-        // to index 0 via OnGoalCompleted which enables and wires the first goal.
-        SenquentialGoalTrial seqTrial = trial as SenquentialGoalTrial;
+        // Restart the trial, passing the previously active goal so RestartSequence
+        // can unsubscribe from its onComplete without relying on objectMap (which
+        // now contains the new order and would return the wrong object at the
+        // same index).
         if (seqTrial != null)
-            seqTrial.RestartSequence();
+            seqTrial.RestartSequence(previousActiveGoal);
 
         string summary = string.Join(", ", newOrder.Select((g, i) => $"{i + 1}:{g.name}"));
         Debug.Log($"TaskEnvironment ({sceneName}): Goal order applied — {summary}");
     }
 
-    // Update is called once per frame
     void Update()
     {
     }
