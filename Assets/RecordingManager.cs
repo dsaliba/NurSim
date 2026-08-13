@@ -31,8 +31,13 @@ public class RecordingManager : MonoBehaviour
     private Dictionary<string, string> conditionOverrides = new Dictionary<string, string>();
 
     private HTTPDash.RecordingCard dashCard;
+    private HTTPDash _registeredWithDash;   // detect HTTPDash restarts across scene reloads
     private bool isRecording = false;
 
+    // Participant ID is entered by the researcher, not driven by the orchestrator.
+    // Persisted via PlayerPrefs so it survives both scene reloads and play-mode restarts.
+    private const string PrefKeyLastParticipant = "IONA_LastParticipant";
+    private string lastParticipant = "";
 
     private ROSConnection ros;
 
@@ -46,6 +51,9 @@ public class RecordingManager : MonoBehaviour
         }
         Instance = this;
         DontDestroyOnLoad(gameObject);
+
+        // Restore participant saved by the last recording submission.
+        lastParticipant = PlayerPrefs.GetString(PrefKeyLastParticipant, "");
     }
 
     void Start()
@@ -75,12 +83,22 @@ public class RecordingManager : MonoBehaviour
     public void RegisterCondition(string key, string[] options) => RegisterCondition(key, key, options);
 
     /// <summary>
-    /// Pin a specific value for a condition for script-driven recordings
-    /// (i.e. when StartRecording() is called directly, not via the dashboard).
-    /// Has no effect on dashboard-driven starts, which always use whatever
-    /// the dropdown is currently set to.
+    /// Pin a specific value for a condition.  Used for both script-driven recordings
+    /// (StartRecording() uses these overrides) and for pre-filling the dashboard
+    /// dropdowns so the correct option is shown after a card re-render.
     /// </summary>
-    public void SetConditionValue(string key, string value) => conditionOverrides[key] = value;
+    public void SetConditionValue(string key, string value)
+    {
+        conditionOverrides[key] = value;
+
+        // Mirror onto the card immediately so the browser sees the right selection
+        // without waiting for the next RegisterCondition / RebuildDashConditions call.
+        if (dashCard != null)
+        {
+            dashCard.conditionValues[key] = value;
+            HTTPDash.Instance?.NotifyCardsChanged();
+        }
+    }
 
     /// <summary>
     /// Starts a recording using the currently registered conditions/overrides.
@@ -96,7 +114,18 @@ public class RecordingManager : MonoBehaviour
 
     private void EnsureDashCard()
     {
+        // If HTTPDash has restarted (new scene → new HTTPDash instance), our cached
+        // dashCard is no longer in its cards list.  Drop the stale reference so we
+        // re-register with the new instance and the recording tab reappears.
+        if (dashCard != null && _registeredWithDash != HTTPDash.Instance)
+        {
+            dashCard = null;
+            _registeredWithDash = null;
+        }
+
         if (dashCard != null || HTTPDash.Instance == null) return;
+
+        _registeredWithDash = HTTPDash.Instance;
         dashCard = HTTPDash.Instance.RegisterRecordingCard(OnDashSubmit);
         RebuildDashConditions();
     }
@@ -116,13 +145,36 @@ public class RecordingManager : MonoBehaviour
             options = c.options.ToList()
         }).ToList();
 
+        // Sync current override values into the card JSON so the browser pre-selects
+        // the correct option after every re-render triggered by RegisterCondition.
+        dashCard.conditionValues.Clear();
+        foreach (var kv in conditionOverrides)
+            dashCard.conditionValues[kv.Key] = kv.Value;
+
+        // Restore participant so the input is pre-filled after a reload.
+        dashCard.participantValue = lastParticipant;
+
         HTTPDash.Instance.NotifyCardsChanged();
     }
 
     private void OnDashSubmit(HTTPDash.RecordingSubmission sub)
     {
         if (sub.command == "start")
+        {
+            // Persist participant so it survives scene reloads and play-mode restarts.
+            if (!string.IsNullOrEmpty(sub.participant))
+            {
+                lastParticipant = sub.participant;
+                PlayerPrefs.SetString(PrefKeyLastParticipant, lastParticipant);
+                PlayerPrefs.Save();
+                if (dashCard != null)
+                {
+                    dashCard.participantValue = lastParticipant;
+                    HTTPDash.Instance?.NotifyCardsChanged();
+                }
+            }
             SendCommand("start", sub.participant, sub.conditions, sub.topics);
+        }
         else if (sub.command == "stop")
             SendCommand("stop", null, null, null);
     }

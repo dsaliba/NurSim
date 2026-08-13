@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
-using Object = System.Object;
 
 public class TaskEnvironment : MonoBehaviour
 {
@@ -55,6 +54,20 @@ public class TaskEnvironment : MonoBehaviour
     void Start()
     {
         RegisterGoalsWithDash();
+
+        // If a geometry sequence was pending from a session restart, apply it now
+        // that goals have been registered and are ready.
+#if UNITY_EDITOR
+        string packed = UnityEditor.SessionState.GetString("IONA_PendingGeometries", "");
+        if (!string.IsNullOrEmpty(packed))
+        {
+            UnityEditor.SessionState.SetString("IONA_PendingGeometries", "");
+            string[] labels = packed.Split(';');
+            Debug.Log($"[TaskEnvironment] Applying deferred geometry order on scene start: " +
+                      string.Join(" → ", labels));
+            ApplyGeometrySequence(labels);
+        }
+#endif
     }
 
     private void RegisterGoalsWithDash()
@@ -88,8 +101,60 @@ public class TaskEnvironment : MonoBehaviour
         Debug.Log($"TaskEnvironment ({sceneName}): Registered {goals.Length} goals with HTTPDash.");
     }
 
+    // ── Geometry sequence ordering (called by SimulationManager) ────────
+
     /// <summary>
-    /// Applies a new goal order received from the dashboard.
+    /// Reorders goals to match the API geometry_sequence.
+    /// <paramref name="orderedLabels"/> should be goal names/labels in the
+    /// order the participant will encounter them.  Goals not present in the
+    /// array are moved to the end and disabled.
+    /// </summary>
+    public void ApplyGeometrySequence(string[] orderedLabels)
+    {
+        if (orderedLabels == null || orderedLabels.Length == 0) return;
+
+        GameObject[] goals = getObjectListByKey("goals")
+            .Where(g => g != null).ToArray();
+
+        if (goals.Length == 0)
+        {
+            Debug.LogWarning($"[TaskEnvironment ({sceneName})] ApplyGeometrySequence: no goals found.");
+            return;
+        }
+
+        // Build lookup (case-insensitive)
+        var goalsByName = new Dictionary<string, GameObject>(
+            System.StringComparer.OrdinalIgnoreCase);
+        foreach (var g in goals)
+            if (!goalsByName.ContainsKey(g.name))
+                goalsByName[g.name] = g;
+
+        var submissions = new List<HTTPDash.OrderedItemSubmission>();
+
+        // Add goals in geometry order (enabled)
+        foreach (var label in orderedLabels)
+        {
+            if (goalsByName.TryGetValue(label, out GameObject go))
+                submissions.Add(new HTTPDash.OrderedItemSubmission { name = go.name, enabled = true });
+            else
+                Debug.LogWarning($"[TaskEnvironment ({sceneName})] No goal named '{label}' — skipping.");
+        }
+
+        // Append remaining goals (not in sequence) as disabled
+        var sequencedNames = new HashSet<string>(
+            submissions.Select(s => s.name), System.StringComparer.OrdinalIgnoreCase);
+        foreach (var g in goals)
+            if (!sequencedNames.Contains(g.name))
+                submissions.Add(new HTTPDash.OrderedItemSubmission { name = g.name, enabled = false });
+
+        ApplyGoalOrder(submissions);
+    }
+
+    // ── Goal ordering ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Applies a new goal order received from the dashboard or from
+    /// <see cref="ApplyGeometrySequence"/>.
     ///
     /// Rules:
     ///   - Unchecked items are excluded from the sequence entirely and set inactive.
@@ -98,19 +163,12 @@ public class TaskEnvironment : MonoBehaviour
     ///     and wires completion events through its normal flow.
     ///
     /// IMPORTANT: The currently active goal is captured from the OLD objectMap
-    /// array BEFORE objectMap is updated. This reference is passed into
-    /// RestartSequence so it can unsubscribe the correct onComplete callback.
-    /// If we looked it up inside RestartSequence, objectMap would already be
-    /// updated and goals[currentGoalIndex] would point to the wrong object,
-    /// leaving the real active goal's callback live and corrupting the sequence.
+    /// array BEFORE objectMap is updated.
     /// </summary>
-    private void ApplyGoalOrder(List<HTTPDash.OrderedItemSubmission> orderedItems)
+    public void ApplyGoalOrder(List<HTTPDash.OrderedItemSubmission> orderedItems)
     {
         if (orderedItems == null || orderedItems.Count == 0) return;
 
-        // Snapshot the current (old) goals array BEFORE any changes.
-        // This is used both to build the lookup map and to find the active goal
-        // by its old index before objectMap is overwritten.
         GameObject[] oldGoals = getObjectListByKey("goals")
             .Where(g => g != null)
             .ToArray();
@@ -120,9 +178,6 @@ public class TaskEnvironment : MonoBehaviour
             if (!goalsMap.ContainsKey(g.name))
                 goalsMap[g.name] = g;
 
-        // Capture the currently active goal by reference from the OLD array now,
-        // before objectMap is updated. After the update, currentGoalIndex no
-        // longer maps to the same object in the new array.
         SenquentialGoalTrial seqTrial = trial as SenquentialGoalTrial;
         GameObject previousActiveGoal = null;
         if (seqTrial != null
@@ -132,15 +187,14 @@ public class TaskEnvironment : MonoBehaviour
             previousActiveGoal = oldGoals[seqTrial.currentGoalIndex];
         }
 
-        // Disable and drop unchecked items — excluded from the sequence.
+        // Disable unchecked items
         foreach (var item in orderedItems.Where(i => !i.enabled))
         {
             if (goalsMap.TryGetValue(item.name, out GameObject go))
                 go.SetActive(false);
         }
 
-        // Build the new ordered array from checked items only.
-        // All are set inactive; RestartSequence → OnGoalCompleted enables goals[0].
+        // Build new ordered array from checked items
         var newOrder = new List<GameObject>();
         foreach (var item in orderedItems.Where(i => i.enabled))
         {
@@ -155,7 +209,6 @@ public class TaskEnvironment : MonoBehaviour
             newOrder.Add(go);
         }
 
-        // Update objectMap with the new ordered, filtered array.
         for (int i = 0; i < objectMap.Length; i++)
         {
             if (objectMap[i].key == "goals")
@@ -165,10 +218,6 @@ public class TaskEnvironment : MonoBehaviour
             }
         }
 
-        // Restart the trial, passing the previously active goal so RestartSequence
-        // can unsubscribe from its onComplete without relying on objectMap (which
-        // now contains the new order and would return the wrong object at the
-        // same index).
         if (seqTrial != null)
             seqTrial.RestartSequence(previousActiveGoal);
 

@@ -254,6 +254,7 @@ GameObject:
   - component: {fileID: 791946146}
   - component: {fileID: 791946145}
   - component: {fileID: 791946147}
+  - component: {fileID: 791946148}
   m_Layer: 0
   m_Name: Simulation Manager
   m_TagString: Untagged
@@ -297,6 +298,11 @@ MonoBehaviour:
     filePath: /home/fetch/catkin_workspaces/iona_devel_ws/joystick_mapping.json
   - displayName: Pose
     filePath: /home/fetch/catkin_workspaces/iona_devel_ws/pose_mapping.json
+  interfaceConditionMappings:
+  - interfaceCondition: robot_gamepad
+    mappingFileDisplayName: Joystick
+  - interfaceCondition: robot_pose
+    mappingFileDisplayName: Pose
   presetPoseOptions:
   - displayName: Home
     serviceName: home_pose
@@ -306,6 +312,10 @@ MonoBehaviour:
     serviceName: side_pose
   rightArmName: right_arm
   leftArmName: left_arm
+  chestHeightMin: 0
+  chestHeightMax: 0.5
+  chestHeightStep: 0.05
+  chestHeightSpeedFraction: 0.5
   loadOnStart: 1
 --- !u!4 &791946144
 Transform:
@@ -362,6 +372,34 @@ MonoBehaviour:
   cmdTopic: /recording/cmd
   topicsTopic: /recording/topics
   statusTopic: /recording/status
+--- !u!114 &791946148
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 791946142}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 07b489436ea4dbe4ab0e4c10d3154d6c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  productionBaseUrl: http://54.236.89.23/api/v1
+  developmentBaseUrl: http://127.0.0.1:8000/api/v1
+  scenePhysicalRobot: Unity200A Fitts Twin
+  sceneSimulatedHand: Unity200A Fitts
+  sceneSimulatedRobot: Unity200A Fitts Robot
+  interfaceNameHumanHand: 
+  interfaceNameGamepadRobot: Fitts
+  interfaceNameMotionController: Fitts
+  mappingFileGamepadRobot: Joystick
+  mappingFileMotionController: Pose
+  recordingInterfaceHumanHand: hand
+  recordingInterfaceGamepadRobot: joystick
+  recordingInterfaceMotionController: pose
+  recordingViewpointFront: Front
+  recordingViewpointBack: Back
+  recordingViewpointSide: Side
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

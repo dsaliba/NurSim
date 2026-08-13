@@ -208,6 +208,18 @@ public class FittsLawTask : Goal
     [Tooltip("Optional message shown by the scene manager as a hint while this goal is active.")]
     public string contextMessage = "Complete the Fitts' Law circular task.";
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Training Sheet
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Header("Training Sheet")]
+    [Tooltip("When enabled the task loops indefinitely instead of completing when all targets are visited. " +
+             "A 'Finish Training' button is added to the HTTP dashboard to manually complete the goal.")]
+    public bool isTrainingSheet = false;
+
+    [Tooltip("Label shown on the Finish Training button in the HTTP dashboard.")]
+    public string finishTrainingButtonLabel = "Finish Training";
+
     /// <summary>
     /// Fired when the entire Fitts' Law sequence is completed.
     /// Wire this into SequentialGoalTrial.OnGoalCompleted exactly like any TrialGoal.
@@ -268,6 +280,9 @@ public class FittsLawTask : Goal
 
     // True until the user first settles on T1; timing only begins after that hit.
     private bool _waitingForStart = true;
+
+    // Prevents registering the Finish Training button more than once.
+    private bool _finishTrainingButtonRegistered = false;
 
     // Dot indicator GameObject
     private GameObject _dotIndicator;
@@ -349,7 +364,10 @@ public class FittsLawTask : Goal
         InitHapticAction();
 
         if (!managedBySceneManager)
+        {
             ResetTask();
+            RegisterFinishTrainingButton();
+        }
     }
 
     private void Update()
@@ -474,6 +492,7 @@ public class FittsLawTask : Goal
             _visitStep++;
             if (_visitStep >= _visitOrder.Length)
             {
+                if (isTrainingSheet) { LoopTrainingSheet(); return; }
                 _taskComplete = true;
                 ApplyTextureForStep(_visitStep);
                 UpdateDotIndicator();
@@ -527,6 +546,7 @@ public class FittsLawTask : Goal
 
         if (_visitStep >= _visitOrder.Length)
         {
+            if (isTrainingSheet) { LoopTrainingSheet(); return; }
             _taskComplete  = true;
             _dwellProgress = 0f;
             PrintReport();
@@ -543,6 +563,63 @@ public class FittsLawTask : Goal
         ApplyTextureForStep(_visitStep);
         UpdateDotIndicator();
         ROSPublishActiveTarget();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Training Sheet helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Called instead of completing when isTrainingSheet is true and the full
+    /// sequence has been visited. Resets back to T1 so the researcher can keep
+    /// practicing without stopping the recording.
+    /// </summary>
+    private void LoopTrainingSheet()
+    {
+        _visitStep          = 0;
+        _movementsCompleted = 0;
+        _waitingForStart    = true;
+        _waitingForStartDisplay = true;
+        _currentTargetLabel = (_visitOrder != null && _visitOrder.Length > 0 && _slotLabel != null)
+            ? _slotLabel[_visitOrder[0]] : 1;
+        _records.Clear();
+        _dwellAccum    = 0f;
+        _dwellProgress = 0f;
+        StartNewMovement();
+        ApplyTextureForStep(0);
+        UpdateDotIndicator();
+    }
+
+    /// <summary>
+    /// Manually completes the training sheet goal — equivalent to what would
+    /// have happened if the task ran in non-training mode. Wired to the
+    /// "Finish Training" dashboard button.
+    /// </summary>
+    public void CompleteTraining()
+    {
+        if (!isTrainingSheet || _taskComplete) return;
+        _taskComplete  = true;
+        _dwellProgress = 0f;
+        PrintReport();
+        ApplyTextureForStep(_visitOrder != null ? _visitOrder.Length : 0);
+        UpdateDotIndicator();
+        ROSPublishActiveTargetCleared();
+        ROSPublishTaskComplete();
+        onComplete?.Invoke();
+        if (managedBySceneManager)
+            gameObject.SetActive(false);
+    }
+
+    /// <summary>
+    /// Registers the "Finish Training" button with HTTPDash exactly once.
+    /// Safe to call from both Start() and Activate().
+    /// </summary>
+    private void RegisterFinishTrainingButton()
+    {
+        if (!isTrainingSheet || _finishTrainingButtonRegistered) return;
+        if (HTTPDash.Instance == null) return;
+        _finishTrainingButtonRegistered = true;
+        HTTPDash.Instance.RegisterButton("Finish Training", finishTrainingButtonLabel, _ => CompleteTraining());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1507,6 +1584,7 @@ public class FittsLawTask : Goal
         EnsureDotIndicator();
         InitHapticAction();
         ResetTask();
+        RegisterFinishTrainingButton();
     }
 
     public void RestartTask()

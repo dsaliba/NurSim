@@ -6,6 +6,7 @@ using System.Net;
 using System.Text;
 using System.Threading;
 //Generated with Chat GPT
+//Generated with Chat GPT
 public class HTTPDash : MonoBehaviour
 {
     public static HTTPDash Instance { get; private set; }
@@ -22,6 +23,108 @@ public class HTTPDash : MonoBehaviour
     private object channelsLock = new object();
     private Dictionary<string, DataChannel> channels = new Dictionary<string, DataChannel>();
 
+    // All orchestrator-* sub-channels are merged into one "orchestrator" DataChannel
+    // so the browser only needs 1 persistent connection instead of 5+ (Chrome allows
+    // only 6 simultaneous connections per origin — every extra pending long-poll
+    // connection steals a slot that POST requests need).
+    private readonly object orcStateLock = new object();
+    private readonly Dictionary<string, string> orcState = new Dictionary<string, string>();
+
+    // ── Pending card initialisation store ────────────────────────────────────
+    // Persists values to PlayerPrefs so they survive play-mode restarts.
+    // Keyed by card title.  Values are applied automatically when a card with the
+    // matching title registers, and to existing cards if StorePendingInit is called
+    // while they are already in the list.
+    private const string PendingInitPrefix = "IONA_PI_";
+
+    /// <summary>
+    /// Cache a raw value for the card titled <paramref name="cardTitle"/>.
+    /// Survives play-mode restarts via PlayerPrefs.
+    /// If a card with that title is already registered, the value is applied to it
+    /// immediately (and the cards channel is republished so the browser pre-fills).
+    /// </summary>
+    public void StorePendingInit(string cardTitle, string rawValue)
+    {
+        if (string.IsNullOrEmpty(cardTitle)) return;
+        PlayerPrefs.SetString(PendingInitPrefix + cardTitle, rawValue ?? "");
+        PlayerPrefs.Save();
+
+        // Apply immediately to any already-registered matching card (main-thread safe).
+        HTMLDashCard existing = null;
+        lock (cardsLock)
+            existing = cards.FirstOrDefault(c =>
+                string.Equals(GetCardTitle(c), cardTitle, StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+        {
+            ApplyPendingToCard(existing, rawValue ?? "");
+            BumpCardsVersionAndFlush();
+        }
+    }
+
+    /// <summary>Remove a stored pending init without applying it.</summary>
+    public void ClearPendingInit(string cardTitle)
+    {
+        PlayerPrefs.DeleteKey(PendingInitPrefix + cardTitle);
+        PlayerPrefs.Save();
+    }
+
+    /// <summary>
+    /// Read and clear a stored pending init value. Returns null if none stored.
+    /// </summary>
+    private string ConsumePendingInit(string cardTitle)
+    {
+        string pkey = PendingInitPrefix + cardTitle;
+        string val  = PlayerPrefs.GetString(pkey, "");
+        if (string.IsNullOrEmpty(val)) return null;
+        PlayerPrefs.DeleteKey(pkey);
+        PlayerPrefs.Save();
+        return val;
+    }
+
+    private static string GetCardTitle(HTMLDashCard c)
+    {
+        if (c is DropdownCard  dc) return dc.title;
+        if (c is MultiFieldCard mf) return mf.title;
+        if (c is DragOrderCard  dg) return dg.title;
+        if (c is SliderCard     sc) return sc.title;
+        if (c is ButtonCard     bc) return bc.title;
+        return null;
+    }
+
+    // Apply a pending-init value to a card that is already registered.
+    // DropdownCard:   sets currentValue and invokes callback (e.g. camera ROS publish).
+    // DragOrderCard:  reorders the items array to match the stored order — does NOT
+    //                 invoke the callback (geometry is already applied to the scene by
+    //                 SimulationManager; the drag list just needs to show the right order).
+    // Other types:    no-op for now (extend as needed).
+    private static void ApplyPendingToCard(HTMLDashCard card, string raw)
+    {
+        if (card is DropdownCard dc)
+        {
+            dc.currentValue = raw;
+            dc.Invoke(raw);
+        }
+        else if (card is DragOrderCard dg)
+        {
+            string[] order = raw.Split(new[]{ ';' }, StringSplitOptions.RemoveEmptyEntries);
+            dg.items = ReorderItems(dg.items, order);
+        }
+    }
+
+    private static string[] ReorderItems(string[] current, string[] order)
+    {
+        var result    = new List<string>();
+        var remaining = new List<string>(current);
+        foreach (string name in order)
+        {
+            int idx = remaining.FindIndex(s =>
+                string.Equals(s, name, StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0) { result.Add(remaining[idx]); remaining.RemoveAt(idx); }
+        }
+        result.AddRange(remaining);   // items not in the order stay at the end
+        return result.ToArray();
+    }
+
     public string localIP = "localhost";
 
     void Awake()
@@ -32,6 +135,10 @@ public class HTTPDash : MonoBehaviour
             return;
         }
         Instance = this;
+        // Reset card ID counter so IDs are stable even when domain-reload is disabled
+        // (without this, IDs increment across play-mode restarts and the browser's
+        // cached card IDs no longer match what the server registered).
+        HTMLDashCard.nextID = 0;
         DontDestroyOnLoad(gameObject);
     }
 
@@ -63,28 +170,75 @@ public class HTTPDash : MonoBehaviour
                     }
                     else if (request.HttpMethod == "POST" && path.StartsWith("/action/"))
                     {
+                        // ── 1. Read body FIRST (Content-Length-bounded — non-blocking) ───────────
+                        // fetch() with JSON.stringify() always sets Content-Length, so reading
+                        // exactly that many bytes returns immediately without waiting for EOF.
+                        // We MUST read before closing the response because response.Close()
+                        // tears down the connection context, zeroing the input stream.
+                        string content = "";
+                        try
+                        {
+                            long len = request.ContentLength64;
+                            if (len > 0 && len <= 1_048_576)           // known length ≤ 1 MiB
+                            {
+                                byte[] bodyBuf = new byte[(int)len];
+                                int total = 0;
+                                while (total < bodyBuf.Length)
+                                {
+                                    int n = request.InputStream.Read(bodyBuf, total, bodyBuf.Length - total);
+                                    if (n <= 0) break;
+                                    total += n;
+                                }
+                                content = Encoding.UTF8.GetString(bodyBuf, 0, total);
+                            }
+                            else if (len < 0)                          // chunked / unknown length
+                            {
+                                // Rare: fetch() almost always provides Content-Length.
+                                // Read up to 64 KiB in one non-blocking pass.
+                                byte[] tmp = new byte[65536];
+                                int n = request.InputStream.Read(tmp, 0, tmp.Length);
+                                content = Encoding.UTF8.GetString(tmp, 0, n);
+                            }
+                            // len == 0 → intentionally empty body; content stays ""
+                        }
+                        catch (Exception bodyEx)
+                        {
+                            Debug.LogWarning($"[HTTPDash] POST body-read error: {bodyEx.GetType().Name}: {bodyEx.Message}");
+                        }
+
+                        // ── 2. Send acknowledgement ───────────────────────────────────────────────
+                        byte[] okBytes = Encoding.UTF8.GetBytes("OK");
+                        response.StatusCode      = 200;
+                        response.ContentType     = "text/plain";
+                        response.ContentLength64 = okBytes.Length;
+                        response.OutputStream.Write(okBytes, 0, okBytes.Length);
+                        response.Close();
+
+                        // ── 3. Parse card ID and dispatch ────────────────────────────────────────
                         string actionKey = path.Substring("/action/".Length);
-                        int acID = int.Parse(actionKey);
+                        if (!int.TryParse(actionKey, out int acID))
+                        {
+                            Debug.LogWarning($"[HTTPDash] POST /action/ — unparseable card ID '{actionKey}'");
+                            continue;
+                        }
 
                         HTMLDashCard matched;
                         lock (cardsLock)
-                        {
                             matched = cards.FirstOrDefault(c => c.id == acID);
-                        }
 
                         if (matched != null)
                         {
-                            using (System.IO.Stream body = request.InputStream)
-                            using (var reader = new System.IO.StreamReader(body, request.ContentEncoding))
-                            {
-                                string content = reader.ReadToEnd();
-                                UnityMainThreadDispatcher.Enqueue(matched.Invoke, content);
-                            }
+                            Debug.Log($"[HTTPDash] POST /action/{acID} → {matched.GetType().Name}, body='{content}'");
+                            UnityMainThreadDispatcher.Enqueue(matched.Invoke, content);
                         }
-
-                        byte[] buffer = Encoding.UTF8.GetBytes("OK");
-                        response.ContentLength64 = buffer.Length;
-                        response.OutputStream.Write(buffer, 0, buffer.Length);
+                        else
+                        {
+                            string registeredIds;
+                            lock (cardsLock)
+                                registeredIds = string.Join(", ", cards.Select(c => $"{c.id}({c.GetType().Name})"));
+                            Debug.LogWarning($"[HTTPDash] POST /action/{acID} — NO CARD FOUND. Registered: [{registeredIds}]");
+                        }
+                        continue; // response already closed above
                     }
                     else if (request.HttpMethod == "GET" && path == "/wait-for-message")
                     {
@@ -104,14 +258,20 @@ public class HTTPDash : MonoBehaviour
                         ch.TryRespondOrQueue(context, since);
                         continue;
                     }
-
                     if (response.OutputStream.CanWrite)
                         response.OutputStream.Close();
                 }
-                catch (HttpListenerException) { }
+                catch (ThreadAbortException) { }  // expected when Unity stops play-mode; don't log, don't Error Pause
+                catch (HttpListenerException hle)
+                {
+                    // Suppress the flood of "connection reset" noise on graceful shutdown,
+                    // but surface genuine errors while running so nothing is invisible.
+                    if (running)
+                        Debug.LogWarning($"[HTTPDash] HttpListenerException: {hle.Message} (code {hle.ErrorCode})");
+                }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"HTTP Server Error: {ex}");
+                    Debug.LogError($"[HTTPDash] Server error: {ex}");
                 }
             }
         });
@@ -195,6 +355,7 @@ public class HTTPDash : MonoBehaviour
             int v; string json; bool immediate;
             lock (lockObj)
             {
+                // Serve immediately when:
                 if (since < version) { v = version; json = cachedJson; immediate = true; }
                 else { waiting.Enqueue(ctx); v = 0; json = null; immediate = false; }
             }
@@ -227,10 +388,37 @@ public class HTTPDash : MonoBehaviour
 
     /// <summary>
     /// Publish new data on an arbitrary named channel.
+    /// All "orchestrator-*" names are automatically merged into a single composite
+    /// "orchestrator" channel so the browser only holds one long-poll connection
+    /// for all orchestrator data (staying under Chrome's 6-connection-per-origin limit).
     /// </summary>
     public void PublishChannel(string name, string json)
     {
-        GetOrCreateChannel(name).Publish(json);
+        const string ORC_PREFIX = "orchestrator-";
+        if (name.StartsWith(ORC_PREFIX))
+        {
+            string key = name.Substring(ORC_PREFIX.Length);
+            string composite;
+            lock (orcStateLock)
+            {
+                orcState[key] = json;                       // update this sub-channel
+                var sb = new StringBuilder("{");
+                bool first = true;
+                foreach (var kv in orcState)
+                {
+                    if (!first) sb.Append(",");
+                    sb.Append($"\"{Esc(kv.Key)}\":{kv.Value}");
+                    first = false;
+                }
+                sb.Append("}");
+                composite = sb.ToString();
+            }
+            GetOrCreateChannel("orchestrator").Publish(composite);
+        }
+        else
+        {
+            GetOrCreateChannel(name).Publish(json);
+        }
     }
 
     // ── Card types ───────────────────────────────────────────────────────
@@ -294,6 +482,7 @@ public class HTTPDash : MonoBehaviour
         public string title;
         public string buttonText;
         public string[] options;
+        public string currentValue;   // set by StorePendingInit; serialized to "value" in JSON for browser pre-fill
         public Action<string> callback;
 
         public DropdownCard(string title, string buttonText, string[] options, Action<string> callback)
@@ -308,7 +497,8 @@ public class HTTPDash : MonoBehaviour
         public override string AsJson()
         {
             string opts = string.Join(",", options.Select(o => $"\"{Esc(o)}\""));
-            return $"{{\"type\":\"dropdown\",\"id\":{id},\"title\":\"{Esc(title)}\",\"buttonText\":\"{Esc(buttonText)}\",\"options\":[{opts}]}}";
+            string valPart = !string.IsNullOrEmpty(currentValue) ? $",\"value\":\"{Esc(currentValue)}\"" : "";
+            return $"{{\"type\":\"dropdown\",\"id\":{id},\"title\":\"{Esc(title)}\",\"buttonText\":\"{Esc(buttonText)}\",\"options\":[{opts}]{valPart}}}";
         }
 
         public override void Invoke(string rawBody) => callback?.Invoke(rawBody);
@@ -554,6 +744,21 @@ public class HTTPDash : MonoBehaviour
         public List<ConditionDef> conditions = new List<ConditionDef>();
         public Action<RecordingSubmission> onSubmit;
 
+        /// <summary>
+        /// Last known participant ID — pre-fills the input after re-renders.
+        /// Set by RecordingManager when a recording starts.
+        /// </summary>
+        public string participantValue = "";
+
+        /// <summary>
+        /// Currently selected value per condition key, set by
+        /// <see cref="RecordingManager.SetConditionValue"/> and synced in
+        /// <see cref="RecordingManager.RebuildDashConditions"/>.
+        /// Serialised as "value" in each condition's JSON so the browser
+        /// can pre-select the correct option after a card re-render.
+        /// </summary>
+        public Dictionary<string, string> conditionValues = new Dictionary<string, string>();
+
         public RecordingCard(Action<RecordingSubmission> onSubmit)
         {
             this.id = HTMLDashCard.nextID++;
@@ -565,9 +770,13 @@ public class HTTPDash : MonoBehaviour
             string condJson = string.Join(",", conditions.Select(c =>
             {
                 string opts = string.Join(",", c.options.Select(o => $"\"{Esc(o)}\""));
-                return $"{{\"key\":\"{Esc(c.key)}\",\"label\":\"{Esc(c.label)}\",\"options\":[{opts}]}}";
+                string valPart = conditionValues.TryGetValue(c.key, out var v) && !string.IsNullOrEmpty(v)
+                                 ? $",\"value\":\"{Esc(v)}\"" : "";
+                return $"{{\"key\":\"{Esc(c.key)}\",\"label\":\"{Esc(c.label)}\",\"options\":[{opts}]{valPart}}}";
             }));
-            return $"{{\"type\":\"recording\",\"id\":{id},\"title\":\"{Esc(title)}\",\"conditions\":[{condJson}]}}";
+            string participantPart = !string.IsNullOrEmpty(participantValue)
+                                     ? $",\"participant\":\"{Esc(participantValue)}\"" : "";
+            return $"{{\"type\":\"recording\",\"id\":{id},\"title\":\"{Esc(title)}\",\"conditions\":[{condJson}]{participantPart}}}";
         }
 
         public override void Invoke(string rawBody)
@@ -583,6 +792,123 @@ public class HTTPDash : MonoBehaviour
         }
     }
 
+
+// ── OrchestratorAction ────────────────────────────────────────────────────────
+
+/// <summary>
+/// One entry from the API geometry_sequence — describes a single task sheet
+/// in the order the participant will encounter it.
+/// </summary>
+[System.Serializable]
+public class OrchestratorGeometry
+{
+    public int    sheetNumber;
+    public string label;
+    public string code;
+}
+
+/// <summary>
+/// Deserialised body from the Orchestrator card's POST /action/{id}.
+/// All fields map 1:1 to the JSON the dashboard JS sends.
+/// </summary>
+[System.Serializable]
+public class OrchestratorAction
+{
+    /// <summary>"fetch" | "apply" | "apply_condition" | "clear"</summary>
+    public string action;
+    /// <summary>Machine API key — stored only in browser cookie, never logged.</summary>
+    public string apiKey;
+    /// <summary>True when the researcher has ticked the "Dev server" checkbox.</summary>
+    public bool   useDevServer;
+    /// <summary>Session ID selected in the dropdown (for action "apply").</summary>
+    public string sessionId;
+    /// <summary>Condition ID clicked in the timeline (for action "apply_condition").</summary>
+    public string conditionId;
+    /// <summary>API interface_condition code, e.g. "gamepad_robot" (for action "apply_condition").</summary>
+    public string interfaceCondition;
+    /// <summary>API viewpoint label, e.g. "side" (for action "apply_condition" — used for camera selection).</summary>
+    public string viewpoint;
+    /// <summary>Position of this condition within its block: 1 = first trial (Training Sheet on), 2/3 = subsequent.</summary>
+    public int    viewpointPosition;
+    /// <summary>Ordered geometry/sheet sequence for this condition (for action "apply_condition").</summary>
+    public OrchestratorGeometry[] geometries;
+    /// <summary>API environment_type, e.g. "physical_robot" (for action "apply_condition" — used for scene mapping).</summary>
+    public string environmentType;
+}
+
+// ── OrchestratorCard ─────────────────────────────────────────────────────────
+
+/// <summary>
+/// Dashboard card that exposes the Orchestrator session-fetch / apply flow.
+/// Renders as type "orchestrator" in JSON; the JS in GenerateDashboardHtml
+/// handles it separately from the generic card types.
+/// </summary>
+[System.Serializable]
+public class OrchestratorCard : HTMLDashCard
+{
+    public string title          = "Orchestrator";
+    public string productionUrl  = "https://fittsteleopstudy.org/api/v1";
+    public string developmentUrl = "http://127.0.0.1:8000/api/v1";
+    public System.Action<OrchestratorAction> callback;
+
+    public OrchestratorCard(System.Action<OrchestratorAction> callback,
+                             string prodUrl = null, string devUrl = null)
+    {
+        this.id       = HTMLDashCard.nextID++;
+        this.callback = callback;
+        if (prodUrl != null) productionUrl  = prodUrl;
+        if (devUrl  != null) developmentUrl = devUrl;
+    }
+
+    public override string AsJson() =>
+        $"{{\"type\":\"orchestrator\",\"id\":{id},\"title\":\"{Esc(title)}\"," +
+        $"\"prodUrl\":\"{Esc(productionUrl)}\",\"devUrl\":\"{Esc(developmentUrl)}\"}}";
+
+    public override void Invoke(string rawBody)
+    {
+        Debug.Log($"[HTTPDash] OrchestratorCard.Invoke called, body length={rawBody?.Length ?? -1}");
+
+        if (string.IsNullOrEmpty(rawBody))
+        {
+            Debug.LogWarning("[HTTPDash] OrchestratorCard.Invoke: empty body, ignoring.");
+            return;
+        }
+
+        OrchestratorAction action;
+        try { action = JsonUtility.FromJson<OrchestratorAction>(rawBody); }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"[HTTPDash] OrchestratorCard: failed to parse body: {e.Message}\nBody: {rawBody}");
+            return;
+        }
+
+        if (action == null)
+        {
+            Debug.LogWarning("[HTTPDash] OrchestratorCard: JsonUtility returned null.");
+            return;
+        }
+
+        // IMPORTANT: never log action.apiKey — it must not appear in any log file.
+        Debug.Log($"[HTTPDash] OrchestratorCard dispatching: action='{action.action}'" +
+                  $" sessionId='{action.sessionId}'" +
+                  $" conditionId='{action.conditionId}'" +
+                  $" interface='{action.interfaceCondition}'" +
+                  $" viewpoint='{action.viewpoint}'" +
+                  $" viewpointPosition={action.viewpointPosition}");
+
+        // Scene / interface / sheet-order setup is handled entirely by
+        // OrchestratorClient.ApplyConditionById(), which has direct access to the
+        // full C# schedule (including environment_type and correct sheet_label values)
+        // and calls SimulationManager.ApplyCondition() with a resolved target scene name.
+        // Nothing to do here except dispatch to the registered callback.
+        callback?.Invoke(action);
+    }
+
+    private static string Esc(string s) =>
+        string.IsNullOrEmpty(s) ? "" : s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+}
+
+
     // ── Registration ─────────────────────────────────────────────────────
 
     [SerializeField] public List<HTMLDashCard> cards = new List<HTMLDashCard>();
@@ -595,8 +921,16 @@ public class HTTPDash : MonoBehaviour
 
     public void RegisterDropdown(string title, string buttonText, string[] options, Action<string> callback)
     {
-        lock (cardsLock) { cards.Add(new DropdownCard(title, buttonText, options, callback)); }
+        var card = new DropdownCard(title, buttonText, options, callback);
+        string pending = ConsumePendingInit(title);
+        if (!string.IsNullOrEmpty(pending))
+            card.currentValue = pending;
+        lock (cardsLock) { cards.Add(card); }
         BumpCardsVersionAndFlush();
+        // Invoke callback AFTER the card is registered and the channel is flushed so the
+        // browser pre-fills the correct value before any side-effect fires.
+        if (!string.IsNullOrEmpty(pending))
+            card.Invoke(pending);
     }
 
     public void RegisterInput(string title, string buttonText, string placeholder, Action<string> callback)
@@ -625,6 +959,15 @@ public class HTTPDash : MonoBehaviour
     /// </summary>
     public DragOrderCard RegisterDragOrder(string title, string buttonText, string[] items, Action<List<OrderedItemSubmission>> callback)
     {
+        // If a pending condition order is cached, pre-sort items to match it.
+        // The callback is NOT invoked — SimulationManager already applied the geometry
+        // sequence to the scene; we just want the drag list to reflect the same order.
+        string pending = ConsumePendingInit(title);
+        if (!string.IsNullOrEmpty(pending))
+        {
+            string[] order = pending.Split(new[]{ ';' }, StringSplitOptions.RemoveEmptyEntries);
+            items = ReorderItems(items, order);
+        }
         var card = new DragOrderCard(title, buttonText, items, callback);
         lock (cardsLock) { cards.Add(card); }
         BumpCardsVersionAndFlush();
@@ -650,6 +993,16 @@ public class HTTPDash : MonoBehaviour
     /// <summary>
     /// Call after mutating a card object in place to re-publish the cards channel.
     /// </summary>
+
+    public OrchestratorCard RegisterOrchestratorCard(System.Action<OrchestratorAction> callback,
+                                                      string prodUrl = null, string devUrl = null)
+{
+    var card = new OrchestratorCard(callback, prodUrl, devUrl);
+    lock (cardsLock) { cards.Add(card); }
+    BumpCardsVersionAndFlush();
+    return card;
+}
+
     public void NotifyCardsChanged() => BumpCardsVersionAndFlush();
 
     private void BumpCardsVersionAndFlush()
@@ -670,11 +1023,11 @@ public class HTTPDash : MonoBehaviour
         PublishChannel("cards", payload);
     }
 
-    // ── Page shell ───────────────────────────────────────────────────────
+    // ── Page shell ───────────────────────────────────────────────────────────────
 
     private string GenerateDashboardHtml()
-    {
-        return @"<!DOCTYPE html>
+{
+    return @"<!DOCTYPE html>
 <html data-theme='light'>
 <head>
   <meta charset='UTF-8' />
@@ -693,6 +1046,8 @@ public class HTTPDash : MonoBehaviour
       --accent-glow:   rgba(185,28,58,0.10);
       --success:       #166534;
       --header-bg:     #FFFFFF;
+      --tl-bg:         #F5F5F8;
+      --tl-border:     rgba(0,0,0,0.10);
     }
     [data-theme='dark'] {
       --bg:            #141416;
@@ -707,6 +1062,8 @@ public class HTTPDash : MonoBehaviour
       --accent-glow:   rgba(196,54,79,0.13);
       --success:       #2D6A46;
       --header-bg:     #1E1E22;
+      --tl-bg:         #1A1A1F;
+      --tl-border:     rgba(255,255,255,0.07);
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -759,8 +1116,13 @@ public class HTTPDash : MonoBehaviour
     }
     .theme-btn:hover { background: var(--raised); color: var(--text); }
 
-    /* ── Shell ───────────────────────────────── */
-    .shell { display: flex; flex: 1; overflow: hidden; }
+    /* ── Outer layout ────────────────────────── */
+    .outer {
+      display: flex; flex-direction: column; flex: 1; overflow: hidden;
+    }
+    .shell-cols { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── Columns ─────────────────────────────── */
     .col {
       display: flex; flex-direction: column; overflow: hidden;
       border-right: 1px solid var(--border-mid); transition: border-color 0.22s;
@@ -788,9 +1150,7 @@ public class HTTPDash : MonoBehaviour
     }
 
     /* ── Grid column-count picker ────────────── */
-    .gcol-picker {
-      display: flex; gap: 2px; margin-left: auto;
-    }
+    .gcol-picker { display: flex; gap: 2px; margin-left: auto; }
     .gcol-btn {
       width: 21px; height: 21px;
       font-size: 0.7em; font-weight: 600; font-family: inherit;
@@ -800,66 +1160,46 @@ public class HTTPDash : MonoBehaviour
       transition: background 0.1s, color 0.1s, border-color 0.1s;
     }
     .gcol-btn:hover { background: var(--raised); color: var(--text); }
-    .gcol-btn.active {
-      background: var(--accent); color: #fff; border-color: var(--accent);
-    }
+    .gcol-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
     /* ── Grid resize ruler ───────────────────── */
-    /*  A thin bar between the col-head and the grid.
-        Column boundaries appear as draggable handles.        */
     .grid-ruler {
       height: 9px; flex-shrink: 0;
       background: var(--raised);
       border-bottom: 1px solid var(--border-mid);
-      position: relative; overflow: visible;
-      transition: background 0.22s;
+      position: relative; overflow: visible; transition: background 0.22s;
     }
-    /* Each handle sits at a column boundary */
     .ruler-handle {
       position: absolute; top: -2px;
-      height: calc(100% + 4px);
-      width: 11px; margin-left: -5.5px;
+      height: calc(100% + 4px); width: 11px; margin-left: -5.5px;
       cursor: col-resize; z-index: 10;
       display: flex; align-items: center; justify-content: center;
     }
     .ruler-handle::after {
-      content: '';
-      width: 2px; height: 100%;
+      content: ''; width: 2px; height: 100%;
       background: var(--border-mid); border-radius: 1px;
       transition: width 0.1s, background 0.1s;
     }
-    .ruler-handle:hover::after,
-    .ruler-handle.resizing::after {
+    .ruler-handle:hover::after, .ruler-handle.resizing::after {
       width: 3px; background: var(--accent);
     }
 
     /* ── Controls grid ───────────────────────── */
     .ctrl-list {
       flex: 1; overflow-y: auto;
-      display: grid;
-      /* columns set dynamically via .style.gridTemplateColumns */
-      align-content: start;
-      gap: 1px;
-      background: var(--border-mid);
-      transition: background 0.22s;
+      display: grid; align-content: start;
+      gap: 1px; background: var(--border-mid); transition: background 0.22s;
     }
     .ctrl-list::-webkit-scrollbar { width: 4px; }
     .ctrl-list::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 2px; }
 
-    /* Every card is a single grid cell */
     .ctrl-row {
-      background: var(--surface);
-      padding: 0.68rem 0.78rem 0.72rem;
-      position: relative;
-      transition: background 0.1s;
-      min-width: 0;
+      background: var(--surface); padding: 0.68rem 0.78rem 0.72rem;
+      position: relative; transition: background 0.1s; min-width: 0;
     }
     .ctrl-row.row-dragging { opacity: 0.28; }
-    .ctrl-row.row-over {
-      outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1;
-    }
+    .ctrl-row.row-over { outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1; }
 
-    /* Drag handle — top-right corner, reveals on hover */
     .row-drag {
       position: absolute; top: 6px; right: 7px;
       cursor: grab; color: var(--text-2); opacity: 0;
@@ -869,17 +1209,16 @@ public class HTTPDash : MonoBehaviour
     .ctrl-row:hover .row-drag { opacity: 0.45; }
     .row-drag:active { cursor: grabbing; opacity: 0.9 !important; }
 
-    /* Card label (compact uppercase) */
     .row-title {
       font-size: 0.7em; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2);
       margin-bottom: 0.4rem; line-height: 1.3;
-      padding-right: 1.4rem; /* room for drag handle */
+      padding-right: 1.4rem;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
 
     /* ── Shared form controls ─────────────────── */
-    input[type='text'], select {
+    input[type='text'], input[type='password'], select {
       width: 100%; padding: 0.44em 0.6em; font-size: 0.875em;
       font-family: inherit; color: var(--text);
       background: var(--raised); border: 1px solid var(--border-mid);
@@ -887,7 +1226,7 @@ public class HTTPDash : MonoBehaviour
       -webkit-appearance: none; appearance: none;
       transition: border-color 0.12s, box-shadow 0.12s, background 0.22s, color 0.22s;
     }
-    input[type='text']:focus, select:focus {
+    input[type='text']:focus, input[type='password']:focus, select:focus {
       border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow);
     }
     select {
@@ -911,7 +1250,6 @@ public class HTTPDash : MonoBehaviour
     }
     .btn-ghost:hover { background: var(--raised); color: var(--text); }
 
-    /* Sub-labels inside multi-field cards */
     .row-lbl {
       display: block; font-size: 0.78em; font-weight: 500; color: var(--text-2);
       margin-top: 0.48rem; margin-bottom: 0.18rem;
@@ -921,8 +1259,7 @@ public class HTTPDash : MonoBehaviour
     /* ── Slider ──────────────────────────────── */
     .slider-val {
       font-size: 1.28em; font-weight: 700; color: var(--accent);
-      letter-spacing: -0.02em; line-height: 1; display: block;
-      margin-bottom: 0.05rem;
+      letter-spacing: -0.02em; line-height: 1; display: block; margin-bottom: 0.05rem;
     }
     input[type='range'] {
       -webkit-appearance: none; appearance: none;
@@ -940,19 +1277,15 @@ public class HTTPDash : MonoBehaviour
       width: 15px; height: 15px; border-radius: 50%;
       background: var(--accent); cursor: pointer; border: 2px solid var(--surface);
     }
-    .slider-ends {
-      display: flex; justify-content: space-between;
-      font-size: 0.69em; color: var(--text-2);
-    }
+    .slider-ends { display: flex; justify-content: space-between; font-size: 0.69em; color: var(--text-2); }
 
-    /* ── DragOrderCard internal list ─────────── */
+    /* ── DragOrderCard ───────────────────────── */
     .drag-list { list-style: none; display: flex; flex-direction: column; gap: 0.2rem; }
     .drag-item {
       display: flex; align-items: center; gap: 0.35rem;
       padding: 0.32rem 0.42rem;
       background: var(--raised); border: 1px solid var(--border);
-      border-radius: 4px; user-select: none;
-      transition: background 0.1s, border-color 0.1s, opacity 0.12s;
+      border-radius: 4px; user-select: none; transition: background 0.1s, border-color 0.1s, opacity 0.12s;
     }
     .drag-item.dragging  { opacity: 0.28; }
     .drag-item.drag-over { border-color: var(--accent); background: var(--accent-glow); }
@@ -961,6 +1294,39 @@ public class HTTPDash : MonoBehaviour
     .drag-check  { flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
     .drag-lbl    { flex: 1; font-size: 0.8em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .drag-idx    { font-size: 0.67em; color: var(--text-2); flex-shrink: 0; min-width: 1.25em; text-align: right; }
+
+    /* ── Orchestrator card ───────────────────── */
+    .orc-row {
+      display: flex; gap: 0.3rem; align-items: center; margin-bottom: 0.3rem;
+    }
+    .orc-row input[type='password'] { flex: 1; margin-bottom: 0; }
+    .orc-dev-label {
+      display: flex; align-items: center; gap: 0.22rem; flex-shrink: 0;
+      font-size: 0.75em; color: var(--text-2); white-space: nowrap; cursor: pointer;
+    }
+    .orc-dev-label input { width: auto; accent-color: var(--accent); }
+    .orc-status {
+      font-size: 0.73em; margin-top: 0.25rem; line-height: 1.35;
+      min-height: 1.3em; color: var(--text-2); word-break: break-word;
+    }
+    .orc-status.ok      { color: var(--success); }
+    .orc-status.error   { color: var(--accent); }
+    .orc-status.loading { color: var(--text-2); font-style: italic; }
+    .orc-session-label {
+      font-size: 0.68em; color: var(--text-2); margin-top: 0.25rem;
+      font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase;
+    }
+    .orc-btn-row { display: flex; gap: 0.3rem; margin-top: 0.3rem; }
+    .orc-btn-row .btn { flex: 1; margin-top: 0; }
+    .orc-connect-row { display: flex; gap: 0.3rem; align-items: center; margin-top: 0.3rem; }
+    .orc-connect-row .btn { flex: 1; margin-top: 0; }
+    .orc-dot {
+      width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+      background: var(--border-mid); transition: background 0.3s;
+    }
+    .orc-dot.connecting  { background: #ca8a04; }
+    .orc-dot.connected   { background: #16a34a; }
+    .orc-dot.failed      { background: var(--accent); }
 
     /* ── Recording column ────────────────────── */
     .rec-scroll { flex: 1; overflow-y: auto; padding: 0.75rem; }
@@ -1036,12 +1402,89 @@ public class HTTPDash : MonoBehaviour
       border-radius: 6px; padding: 0.55rem 0.65rem; color: #fff;
       animation: fadeIn 0.18s ease;
     }
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(-4px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     .notif-item h3 { font-size: 0.78em; font-weight: 600; margin-bottom: 0.18em; }
     .notif-item p  { font-size: 0.73em; opacity: 0.83; line-height: 1.4; }
+
+    /* ── Schedule timeline ───────────────────── */
+    .timeline-panel {
+      flex-shrink: 0;
+      background: var(--tl-bg);
+      border-top: 1px solid var(--tl-border);
+      display: flex; flex-direction: column;
+      transition: background 0.22s, border-color 0.22s;
+      max-height: 170px;
+    }
+    .timeline-panel.collapsed { max-height: 33px; }
+    .timeline-head {
+      height: 33px; padding: 0 0.7rem;
+      display: flex; align-items: center; gap: 0.6rem;
+      border-bottom: 1px solid var(--tl-border); flex-shrink: 0;
+      background: var(--raised); transition: background 0.22s;
+    }
+    .tl-session-label {
+      font-size: 0.68em; color: var(--text-2); font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+    }
+    .tl-session-label strong { color: var(--text); }
+    .tl-collapse-btn {
+      flex-shrink: 0; background: transparent; border: none; cursor: pointer;
+      color: var(--text-2); font-size: 0.7em; padding: 2px 5px;
+      border-radius: 3px; transition: background 0.1s;
+    }
+    .tl-collapse-btn:hover { background: var(--border-mid); color: var(--text); }
+    .timeline-scroll {
+      flex: 1; overflow-x: auto; overflow-y: hidden;
+      display: flex; gap: 1px;
+      background: var(--border-mid);
+      padding: 0;
+    }
+    .timeline-scroll::-webkit-scrollbar { height: 4px; }
+    .timeline-scroll::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 2px; }
+    .tl-block {
+      background: var(--surface);
+      min-width: 210px; flex: 1 1 0;
+      display: flex; flex-direction: column;
+    }
+    .tl-block-head {
+      padding: 0.22rem 0.6rem; background: var(--raised);
+      border-bottom: 1px solid var(--tl-border);
+      font-size: 0.63em; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--text-2);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .tl-condition {
+      display: flex; align-items: center; gap: 0.4rem;
+      padding: 0.3rem 0.6rem; cursor: pointer;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    .tl-condition:last-child { border-bottom: none; }
+    .tl-condition:hover { background: var(--raised); }
+    .tl-condition.active { background: var(--accent-glow); }
+    .tl-vp {
+      font-size: 0.67em; font-weight: 700; min-width: 36px; text-align: center;
+      background: var(--raised); border: 1px solid var(--border-mid);
+      border-radius: 3px; padding: 0.1em 0.32em; flex-shrink: 0;
+      text-transform: uppercase; color: var(--text-2);
+    }
+    .tl-condition.active .tl-vp {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+    .tl-geoms { display: flex; gap: 2px; flex-wrap: nowrap; overflow: hidden; }
+    .tl-geom {
+      font-size: 0.62em; font-weight: 600;
+      background: var(--raised); border: 1px solid var(--border-mid);
+      border-radius: 3px; padding: 0.08em 0.3em; color: var(--text);
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .tl-arrow {
+      font-size: 0.55em; color: var(--text-2); flex-shrink: 0; line-height: 1;
+    }
+    .timeline-empty {
+      padding: 0.9rem 1rem; color: var(--text-2); font-size: 0.75em;
+      font-style: italic; text-align: center;
+    }
 
     /* ── Save toast ──────────────────────────── */
     .save-toast {
@@ -1066,45 +1509,57 @@ public class HTTPDash : MonoBehaviour
     <button class='theme-btn' id='themeToggle' title='Toggle dark mode'>&#9790;</button>
   </header>
 
-  <div class='shell'>
-    <!-- Controls column -->
-    <div class='col col-controls'>
-      <div class='col-head'>
-        <span class='col-label'>Controls</span>
-        <!-- Column count picker: 1–6, built by JS -->
-        <div class='gcol-picker' id='gcol-picker'></div>
-      </div>
-      <!-- Resize ruler: drag handles at column boundaries -->
-      <div class='grid-ruler' id='grid-ruler'></div>
-      <div class='ctrl-list' id='card-container'></div>
-    </div>
-
-    <!-- Recording column -->
-    <div class='col col-recording'>
-      <div class='col-head'><span class='col-label'>Recording</span></div>
-      <div class='rec-scroll' id='recording-container'></div>
-    </div>
-
-    <!-- Notifications column -->
-    <div class='col col-notifications'>
-      <div class='col-head'>
-        <span class='col-label'>Notifications</span>
-        <span class='badge' id='notif-count'>0</span>
-      </div>
-      <div class='notif-scroll' id='notif-list'>
-        <div class='notif-empty' id='notif-empty'>
-          <span class='notif-empty-ico'>&#128276;</span>
-          <span>No notifications yet</span>
+  <div class='outer'>
+    <div class='shell-cols'>
+      <!-- Controls column -->
+      <div class='col col-controls'>
+        <div class='col-head'>
+          <span class='col-label'>Controls</span>
+          <div class='gcol-picker' id='gcol-picker'></div>
         </div>
+        <div class='grid-ruler' id='grid-ruler'></div>
+        <div class='ctrl-list' id='card-container'></div>
+      </div>
+
+      <!-- Recording column -->
+      <div class='col col-recording'>
+        <div class='col-head'><span class='col-label'>Recording</span></div>
+        <div class='rec-scroll' id='recording-container'></div>
+      </div>
+
+      <!-- Notifications column -->
+      <div class='col col-notifications'>
+        <div class='col-head'>
+          <span class='col-label'>Notifications</span>
+          <span class='badge' id='notif-count'>0</span>
+        </div>
+        <div class='notif-scroll' id='notif-list'>
+          <div class='notif-empty' id='notif-empty'>
+            <span class='notif-empty-ico'>&#128276;</span>
+            <span>No notifications yet</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Schedule timeline — appears at bottom, collapsed by default -->
+    <div class='timeline-panel collapsed' id='timeline-panel'>
+      <div class='timeline-head'>
+        <span class='col-label'>Schedule Timeline</span>
+        <span class='tl-session-label' id='tl-session-label'>No session loaded</span>
+        <button class='tl-collapse-btn' id='tl-collapse-btn'>&#9650;</button>
+      </div>
+      <div id='timeline-body' style='flex:1;display:flex;overflow:hidden;'>
+        <div class='timeline-empty' id='timeline-empty'>Apply a session in the Orchestrator card to see the schedule.</div>
+        <div class='timeline-scroll' id='timeline-scroll' style='display:none'></div>
       </div>
     </div>
   </div>
 
-  <!-- Brief confirmation shown after auto-save -->
   <div class='save-toast' id='save-toast'>Layout saved</div>
 
   <script>
-    // ── Theme ─────────────────────────────────────────────────────────────
+    // ── Theme ─────────────────────────────────────────────────────────────────
     const html = document.documentElement;
     const themeBtn = document.getElementById('themeToggle');
     let isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -1118,8 +1573,9 @@ public class HTTPDash : MonoBehaviour
     let recordingTopics = [];
     let recordingSelected = {};
     let notifCount = 0;
+    let activeConditionId = null;
 
-    // ── Cookie helpers ────────────────────────────────────────────────────
+    // ── Cookie helpers ────────────────────────────────────────────────────────
     function gc(name) {
       const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
       return m ? decodeURIComponent(m[1]) : null;
@@ -1128,20 +1584,56 @@ public class HTTPDash : MonoBehaviour
       document.cookie = `${name}=${encodeURIComponent(val)}; max-age=31536000; path=/`;
     }
 
-    // ── Toast ─────────────────────────────────────────────────────────────
+    // ── Toast ─────────────────────────────────────────────────────────────────
     let toastTimer = null;
     function showToast(msg) {
       const t = document.getElementById('save-toast');
-      t.textContent = msg;
-      t.classList.add('show');
+      t.textContent = msg; t.classList.add('show');
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => t.classList.remove('show'), 1600);
     }
 
-    // ── Grid settings ─────────────────────────────────────────────────────
+    // ── Form-state cookie (non-recording fields only) ─────────────────────────
+    const FORM_KEY = 'httpdash_form_state';
+
+    function loadFormState() {
+      try { const r = gc(FORM_KEY); return r ? JSON.parse(r) : {}; } catch(e) { return {}; }
+    }
+    function saveFormState() {
+      const c = document.getElementById('card-container');
+      if (!c) return;
+      const state = loadFormState();
+      c.querySelectorAll('select, input[type=""text""], input[type=""range""]').forEach(el => {
+        if (el.id && !el.closest('.rec-form')) state[el.id] = el.value;
+      });
+      sc(FORM_KEY, JSON.stringify(state));
+    }
+    function restoreFormState() {
+      const state = loadFormState();
+      Object.keys(state).forEach(id => {
+        const el = document.getElementById(id);
+        if (el && !el.closest('.rec-form')) {
+          el.value = state[id];
+          // Sync slider display
+          if (el.type === 'range') {
+            const slv = document.getElementById('slv-' + id.replace('sl-', ''));
+            if (slv) slv.textContent = parseFloat(state[id]).toFixed(stepDec(parseFloat(el.step)));
+          }
+        }
+      });
+    }
+    // Auto-save on any change inside card-container
+    document.addEventListener('change', e => {
+      if (e.target.closest('#card-container')) saveFormState();
+    });
+    document.addEventListener('input', e => {
+      if (e.target.type === 'range' && e.target.closest('#card-container')) saveFormState();
+    });
+
+    // ── Grid settings ─────────────────────────────────────────────────────────
     const GRID_KEY = 'httpdash_grid';
     let gridCols = 3;
-    let gridWidths = [1, 1, 1]; // fr values per column
+    let gridWidths = [1, 1, 1];
 
     function loadGrid() {
       try {
@@ -1149,135 +1641,85 @@ public class HTTPDash : MonoBehaviour
         if (raw) {
           const d = JSON.parse(raw);
           if (d.cols >= 1 && d.cols <= 6) gridCols = d.cols;
-          if (Array.isArray(d.widths) && d.widths.length === gridCols) {
-            gridWidths = d.widths;
-          } else {
-            gridWidths = Array(gridCols).fill(1);
-          }
+          gridWidths = (Array.isArray(d.widths) && d.widths.length === gridCols)
+            ? d.widths : Array(gridCols).fill(1);
         }
       } catch(e) { gridWidths = Array(gridCols).fill(1); }
     }
-
-    function saveGrid() {
-      sc(GRID_KEY, JSON.stringify({ cols: gridCols, widths: gridWidths }));
-      showToast('Layout saved');
-    }
-
-    // Apply column template to the grid and rebuild the ruler
+    function saveGrid() { sc(GRID_KEY, JSON.stringify({ cols: gridCols, widths: gridWidths })); showToast('Layout saved'); }
     function applyGrid() {
-      const container = document.getElementById('card-container');
-      container.style.gridTemplateColumns = gridWidths.map(w => w + 'fr').join(' ');
+      document.getElementById('card-container').style.gridTemplateColumns = gridWidths.map(w => w + 'fr').join(' ');
       buildRuler();
-      // Sync active state on picker buttons
-      document.querySelectorAll('.gcol-btn').forEach(b => {
-        b.classList.toggle('active', +b.dataset.n === gridCols);
-      });
+      document.querySelectorAll('.gcol-btn').forEach(b => b.classList.toggle('active', +b.dataset.n === gridCols));
     }
-
-    // Change column count
     function setColCount(n) {
       gridCols = n;
-      // Keep existing widths for preserved columns; pad new columns with 1
       const old = gridWidths.slice();
       gridWidths = Array.from({ length: n }, (_, i) => old[i] !== undefined ? old[i] : 1);
-      // Re-normalise so widths sum to n (prevents extreme proportions after changing count)
       const sum = gridWidths.reduce((a, b) => a + b, 0);
       gridWidths = gridWidths.map(w => (w / sum) * n);
-      saveGrid();
-      applyGrid();
+      saveGrid(); applyGrid();
     }
-
-    // Build the column-count picker buttons (1–6)
     function buildColPicker() {
       const picker = document.getElementById('gcol-picker');
       picker.innerHTML = '';
       for (let n = 1; n <= 6; n++) {
         const btn = document.createElement('button');
         btn.className = 'gcol-btn' + (n === gridCols ? ' active' : '');
-        btn.dataset.n = n;
-        btn.textContent = n;
+        btn.dataset.n = n; btn.textContent = n;
         btn.title = `${n} column${n > 1 ? 's' : ''}`;
         btn.onclick = () => setColCount(n);
         picker.appendChild(btn);
       }
     }
-
-    // Build draggable ruler handles at each column boundary
     function buildRuler() {
       const ruler = document.getElementById('grid-ruler');
       ruler.innerHTML = '';
       if (gridCols <= 1) return;
-
       const total = gridWidths.reduce((a, b) => a + b, 0);
       let cumPct = 0;
-      const rulerW = () => ruler.offsetWidth; // live width
-
       gridWidths.slice(0, -1).forEach((w, i) => {
         cumPct += w / total;
         const handle = document.createElement('div');
         handle.className = 'ruler-handle';
         handle.style.left = (cumPct * 100) + '%';
         ruler.appendChild(handle);
-
         handle.addEventListener('mousedown', e => {
           e.preventDefault();
-          const startX = e.clientX;
-          const rw = rulerW();
-          const startWidths = [...gridWidths];
-          const frPerPx = total / rw;
-          const minFr = 0.15;
-
+          const startX = e.clientX, rw = ruler.offsetWidth;
+          const startWidths = [...gridWidths], frPerPx = total / rw, minFr = 0.15;
           handle.classList.add('resizing');
           document.body.style.cursor = 'col-resize';
           document.body.style.userSelect = 'none';
-
           function onMove(ev) {
             const dFr = (ev.clientX - startX) * frPerPx;
-            const newA = startWidths[i] + dFr;
-            const newB = startWidths[i + 1] - dFr;
+            const newA = startWidths[i] + dFr, newB = startWidths[i + 1] - dFr;
             if (newA < minFr || newB < minFr) return;
-
-            gridWidths[i] = newA;
-            gridWidths[i + 1] = newB;
-
-            // Update grid immediately
-            document.getElementById('card-container').style.gridTemplateColumns =
-              gridWidths.map(v => v + 'fr').join(' ');
-
-            // Reposition all handles without full rebuild (perf)
+            gridWidths[i] = newA; gridWidths[i + 1] = newB;
+            document.getElementById('card-container').style.gridTemplateColumns = gridWidths.map(v => v + 'fr').join(' ');
             const tot2 = gridWidths.reduce((a, b) => a + b, 0);
             let cum2 = 0;
             ruler.querySelectorAll('.ruler-handle').forEach((h, hi) => {
-              cum2 += gridWidths[hi] / tot2;
-              h.style.left = (cum2 * 100) + '%';
+              cum2 += gridWidths[hi] / tot2; h.style.left = (cum2 * 100) + '%';
             });
           }
-
           function onUp() {
             handle.classList.remove('resizing');
-            document.body.style.cursor = '';
-            document.body.style.userSelect = '';
+            document.body.style.cursor = ''; document.body.style.userSelect = '';
             document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
-            saveGrid();
+            document.removeEventListener('mouseup', onUp); saveGrid();
           }
-
           document.addEventListener('mousemove', onMove);
           document.addEventListener('mouseup', onUp);
         });
       });
     }
 
-    // ── Card order cookie ─────────────────────────────────────────────────
+    // ── Card order cookie ─────────────────────────────────────────────────────
     const ORDER_KEY = 'httpdash_ctrl_order';
-
-    function getSavedOrder() {
-      try { const r = gc(ORDER_KEY); return r ? JSON.parse(r) : []; } catch(e) { return []; }
-    }
+    function getSavedOrder() { try { const r = gc(ORDER_KEY); return r ? JSON.parse(r) : []; } catch(e) { return []; } }
     function saveCurrentOrder() {
-      const ids = Array.from(
-        document.getElementById('card-container').querySelectorAll('.ctrl-row[data-cid]')
-      ).map(el => +el.dataset.cid);
+      const ids = Array.from(document.getElementById('card-container').querySelectorAll('.ctrl-row[data-cid]')).map(el => +el.dataset.cid);
       sc(ORDER_KEY, JSON.stringify(ids));
     }
     function applyOrder(cards) {
@@ -1291,19 +1733,15 @@ public class HTTPDash : MonoBehaviour
       return ordered;
     }
 
-    // ── Row drag-to-reorder (grid-aware) ──────────────────────────────────
+    // ── Row drag-to-reorder ───────────────────────────────────────────────────
     function initCtrlReorder(container) {
       let dragged = null, fromHandle = false;
-
-      container.addEventListener('mousedown', e => {
-        fromHandle = !!e.target.closest('.row-drag');
-      });
+      container.addEventListener('mousedown', e => { fromHandle = !!e.target.closest('.row-drag'); });
       container.addEventListener('dragstart', e => {
         if (!fromHandle) { e.preventDefault(); return; }
         dragged = e.target.closest('.ctrl-row[draggable]');
         if (!dragged) { e.preventDefault(); return; }
-        dragged.classList.add('row-dragging');
-        e.dataTransfer.effectAllowed = 'move';
+        dragged.classList.add('row-dragging'); e.dataTransfer.effectAllowed = 'move';
       });
       container.addEventListener('dragend', () => {
         if (dragged) { dragged.classList.remove('row-dragging'); saveCurrentOrder(); }
@@ -1311,16 +1749,13 @@ public class HTTPDash : MonoBehaviour
         dragged = null; fromHandle = false;
       });
       container.addEventListener('dragover', e => {
-        e.preventDefault();
-        if (!dragged) return;
+        e.preventDefault(); if (!dragged) return;
         const target = e.target.closest('.ctrl-row[draggable]');
         if (!target || target === dragged) return;
         container.querySelectorAll('.ctrl-row').forEach(el => el.classList.remove('row-over'));
         target.classList.add('row-over');
-        // 2-D: diagonal split — top-left triangle = before, bottom-right = after
         const r = target.getBoundingClientRect();
-        const nx = (e.clientX - r.left) / r.width;
-        const ny = (e.clientY - r.top) / r.height;
+        const nx = (e.clientX - r.left) / r.width, ny = (e.clientY - r.top) / r.height;
         if (nx + ny < 1) container.insertBefore(dragged, target);
         else container.insertBefore(dragged, target.nextSibling);
       });
@@ -1330,13 +1765,13 @@ public class HTTPDash : MonoBehaviour
       });
     }
 
-    // ── DragOrderCard internal drag ───────────────────────────────────────
+    // ── DragOrderCard internal drag ───────────────────────────────────────────
     function initDragList(listId) {
       const list = document.getElementById(listId);
       if (!list) return;
       let dragged = null;
       list.addEventListener('dragstart', e => {
-        e.stopPropagation(); // don't bubble to row-reorder
+        e.stopPropagation();
         dragged = e.target.closest('.drag-item');
         if (!dragged) return;
         setTimeout(() => dragged && dragged.classList.add('dragging'), 0);
@@ -1344,12 +1779,10 @@ public class HTTPDash : MonoBehaviour
       list.addEventListener('dragend', () => {
         if (dragged) dragged.classList.remove('dragging');
         list.querySelectorAll('.drag-item').forEach(el => el.classList.remove('drag-over'));
-        dragged = null;
-        refreshIdx(list);
+        dragged = null; refreshIdx(list);
       });
       list.addEventListener('dragover', e => {
-        e.preventDefault();
-        if (!dragged) return;
+        e.preventDefault(); if (!dragged) return;
         const t = e.target.closest('.drag-item');
         if (!t || t === dragged) return;
         list.querySelectorAll('.drag-item').forEach(el => el.classList.remove('drag-over'));
@@ -1363,7 +1796,6 @@ public class HTTPDash : MonoBehaviour
         if (t && t !== dragged) t.classList.remove('drag-over');
       });
     }
-
     function refreshIdx(list) {
       list.querySelectorAll('.drag-item').forEach((el, i) => {
         const ix = el.querySelector('.drag-idx');
@@ -1381,16 +1813,270 @@ public class HTTPDash : MonoBehaviour
 
     const HANDLE = '<span class=""row-drag"" title=""Drag to reorder"">&#x2807;</span>';
 
-    // ── Render cards ──────────────────────────────────────────────────────
+    // ── Orchestrator card state ───────────────────────────────────────────────
+    // API key stored separately so it is never merged into the generic form-state
+    const ORC_KEY_COOKIE = 'iona_apikey';
+    let orcCardIds         = [];  // tracks which card IDs are orchestrator type
+    let orcCardUrls        = {};  // { cardId: { prod, dev } } — populated from card JSON
+    let orcFetchedSessions = {};  // { session_id: raw API session object } — set by orcFetch
+    let orcConditionData   = {};  // { condition_id: { labels, config, session, isFirstInBlock } } — set by parseScheduleFromApi
+
+    function orcGetKey()       { return gc(ORC_KEY_COOKIE) || ''; }
+    function orcSaveKey(k)     { sc(ORC_KEY_COOKIE, k); }
+
+    function orcPost(cardId, payload) {
+      fetch('/action/' + cardId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(r => { if (!r.ok) console.error('[OrchestratorCard] POST failed:', r.status, r.statusText); })
+      .catch(err => console.error('[OrchestratorCard] POST error:', err));
+    }
+
+    // Runs entirely in the browser — no Unity dispatch needed.
+    // Requires the API server to have CORS configured for the Authorization header.
+    function orcConnect(cardId) {
+      const keyEl = document.getElementById('orc-key-' + cardId);
+      const devEl = document.getElementById('orc-dev-' + cardId);
+      const key   = (keyEl ? keyEl.value : '').trim();
+      const dev   = devEl ? devEl.checked : false;
+      if (!key) {
+        setOrcConnectDot(cardId, 'failed');
+        setOrcStatus('error', 'Enter an API key first.');
+        return;
+      }
+      orcSaveKey(key);
+      setOrcConnectDot(cardId, 'connecting');
+      setOrcStatus('loading', 'Testing connection…');
+
+      const urls = orcCardUrls[cardId] || {};
+      const base = (dev ? urls.dev : urls.prod) || (dev
+        ? 'http://127.0.0.1:8000/api/v1'
+        : 'https://fittsteleopstudy.org/api/v1');
+      const url  = base + '/sessions?schedule_available=true&page_size=1';
+
+      console.log('[OrchestratorCard] Connect → GET', url);
+
+      fetch(url, { headers: { 'Authorization': 'Api-Key ' + key } })
+        .then(r => {
+          console.log('[OrchestratorCard] Connect response: HTTP', r.status);
+          if (r.ok) {
+            setOrcConnectDot(cardId, 'connected');
+            setOrcStatus('ok', 'Connected — API reachable at ' + base + '.');
+          } else if (r.status === 401 || r.status === 403) {
+            setOrcConnectDot(cardId, 'failed');
+            setOrcStatus('error', 'Auth failed (HTTP ' + r.status + '). Check your API key.');
+          } else {
+            setOrcConnectDot(cardId, 'failed');
+            setOrcStatus('error', 'Server error: HTTP ' + r.status + '.');
+          }
+        })
+        .catch(err => {
+          console.error('[OrchestratorCard] Connect error:', err);
+          setOrcConnectDot(cardId, 'failed');
+          setOrcStatus('error', 'Connection failed: ' + err.message);
+        });
+    }
+
+    // Fetch sessions directly from the API in the browser (no Unity dispatch needed).
+    // Populates the session dropdown and caches session metadata for Apply.
+    function orcFetch(cardId) {
+      const keyEl = document.getElementById('orc-key-' + cardId);
+      const devEl = document.getElementById('orc-dev-' + cardId);
+      const key   = (keyEl ? keyEl.value : '').trim();
+      const dev   = devEl ? devEl.checked : false;
+      if (!key) { setOrcStatus('error', 'Enter an API key first.'); return; }
+      orcSaveKey(key);
+      setOrcStatus('loading', 'Fetching sessions…');
+
+      const urls = orcCardUrls[cardId] || {};
+      const base = (dev ? urls.dev : urls.prod) || (dev
+        ? 'http://127.0.0.1:8000/api/v1'
+        : 'https://fittsteleopstudy.org/api/v1');
+      const url  = base + '/sessions?schedule_available=true&page_size=100';
+
+      console.log('[OrchestratorCard] Fetch → GET', url);
+
+      fetch(url, { headers: { 'Authorization': 'Api-Key ' + key } })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(data => {
+          const results = data.results || [];
+          // Cache raw objects so Apply can use participant_id, study_name etc.
+          orcFetchedSessions = {};
+          results.forEach(s => { orcFetchedSessions[s.session_id] = s; });
+
+          setOrcSessions(results.map(s => ({
+            id:    s.session_id,
+            label: `${s.participant_id} — ${s.study_name} (${s.workflow_status})`
+          })));
+
+          const total = data.count != null ? data.count : results.length;
+          const msg = results.length < total
+            ? `Loaded ${results.length} of ${total} sessions.`
+            : `Loaded ${results.length} session${results.length !== 1 ? 's' : ''}.`;
+          setOrcStatus('ok', msg);
+          console.log('[OrchestratorCard] Sessions:', results.length);
+        })
+        .catch(err => {
+          console.error('[OrchestratorCard] Fetch error:', err);
+          setOrcStatus('error', 'Fetch failed: ' + err.message);
+        });
+    }
+
+    // Maps the API schedule response (schema_version 1.0.0) to the shape
+    // renderTimeline() expects, and simultaneously populates orcConditionData
+    // so applyConditionLocally() can fill the recording card without a Unity round-trip.
+    function parseScheduleFromApi(apiData, sessionMeta) {
+      const sess   = apiData.session || {};
+      const blocks = apiData.blocks  || [];
+      orcConditionData = {};  // reset on every apply
+
+      function ifaceLabel(code) {
+        return (code || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      }
+
+      return {
+        participantId: sess.participant_id || (sessionMeta && sessionMeta.participant_id) || '',
+        studyName:     sess.study_name     || (sessionMeta && sessionMeta.study_name)     || '',
+        sessionId:     sess.session_id     || (sessionMeta && sessionMeta.session_id)     || '',
+        blocks: blocks.map(b => ({
+          ordinal:       b.assigned_ordinal,
+          interfaceCode: ifaceLabel(b.interface_condition),
+          conditions:   (b.conditions || []).map(c => {
+            const lbl = c.labels || {};
+            const cfg = c.condition_configuration || {};
+            // viewpoint_position 1 = first trial of this interface block → Training Sheet on
+            orcConditionData[c.condition_id] = {
+              labels:         lbl,
+              config:         cfg,
+              session:        sess,
+              sessionMeta:    sessionMeta,
+              isFirstInBlock: (cfg.viewpoint_position || 1) === 1
+            };
+            return {
+              conditionId:    c.condition_id,
+              interfaceLabel: lbl.interface_condition || '',
+              viewpointLabel: lbl.viewpoint           || '',
+              viewpoint:      lbl.viewpoint           || '',
+              geometries:    (lbl.geometry_sequence || []).map(g => ({
+                sheetNumber: g.sheet_number,
+                label:       g.sheet_label || g.label || '',
+                code:        g.code        || ''
+              }))
+            };
+          })
+        }))
+      };
+    }
+
+    // Apply a condition's configuration directly in the browser:
+    //   • pre-fills the recording card participant + condition dropdowns
+    //     off for subsequent trials in the same block)
+    // Unity is still notified via orcPost so it can load the game-side scene.
+    function applyConditionLocally(conditionId) {
+      const d = orcConditionData[conditionId];
+      if (!d) { console.warn('[OrchestratorCard] No cached data for condition', conditionId); return; }
+
+      const cfg  = d.config  || {};
+      const lbl  = d.labels  || {};
+      const sess = d.session || d.sessionMeta || {};
+
+      // ── Participant ──────────────────────────────────────────────────────
+      const participant = sess.participant_id || cfg.participant_id || '';
+      document.querySelectorAll('[id^=""rp-""]').forEach(el => { el.value = participant; });
+
+      // ── Recording condition dropdowns ────────────────────────────────────
+      // Try to set each dropdown by matching its options against both the raw
+      // API code (e.g. ""gamepad_robot"") and the human label (e.g. ""Gamepad Robot Control"").
+      function trySetSelect(el, ...candidates) {
+        for (const v of candidates) {
+          if (!v) continue;
+          // exact value match
+          if (el.querySelector(`option[value=""${CSS.escape(v)}""]`)) { el.value = v; return; }
+          // text-content match
+          const byText = Array.from(el.options).find(o => o.text.trim() === v);
+          if (byText) { el.value = byText.value; return; }
+        }
+      }
+
+      // Interface condition  (key ending in ""-interface"")
+      document.querySelectorAll('[id^=""rc-""][id$=""-interface""]').forEach(el =>
+        trySetSelect(el, cfg.interface_condition, lbl.interface_condition));
+
+      // Viewpoint / camera  (key ending in ""-viewpoint"" or ""-camera"")
+      document.querySelectorAll('[id^=""rc-""][id$=""-viewpoint""], [id^=""rc-""][id$=""-camera""]').forEach(el =>
+        trySetSelect(el, cfg.viewpoint, lbl.viewpoint));
+
+      // ── Training Sheet topic ─────────────────────────────────────────────
+      // Enabled on the first trial of each interface block (viewpoint_position=1),
+      // disabled on subsequent trials so the sheet isn't recorded twice.
+      const TRAINING = 'Training Sheet';
+      Object.keys(recordingSelected).forEach(cardId => {
+        if (d.isFirstInBlock) {
+          // Add if the topic exists in the current list
+          const exists = recordingTopics.some(t => t.name === TRAINING);
+          if (exists) recordingSelected[cardId].add(TRAINING);
+        } else {
+          recordingSelected[cardId].delete(TRAINING);
+        }
+        renderTopicList(cardId);
+      });
+
+      saveFormState();
+      console.log('[OrchestratorCard] Applied condition locally:', conditionId,
+                  'interface:', cfg.interface_condition, 'viewpoint:', cfg.viewpoint,
+                  'isFirstInBlock:', d.isFirstInBlock);
+    }
+
+    // ── Render cards ──────────────────────────────────────────────────────────
     function renderCards(list) {
       renderNormal(list.filter(c => c.type !== 'recording'));
       renderRecording(list.filter(c => c.type === 'recording'));
+      restoreFormState();  // restore dropdowns/inputs from cookie after each render
+      applyCardValues(list); // override with condition-driven values (higher priority than cookie)
+      // Re-wire orchestrator API key from cookie after re-render
+      orcCardIds.forEach(id => {
+        const el = document.getElementById('orc-key-' + id);
+        if (el && !el.value) el.value = orcGetKey();
+      });
+    }
+
+    // Apply server-provided current values to card controls.
+    // Dropdown 'value' is set by StorePendingInit (C#).
+    // Recording card condition 'value' is set by RecordingManager.SetConditionValue (C#).
+    // Both take priority over cookie-saved state (called after restoreFormState).
+    function applyCardValues(list) {
+      list.forEach(card => {
+        if (card.type === 'dropdown' && card.value) {
+          const sel = document.getElementById('sel-' + card.id);
+          if (sel && Array.from(sel.options).some(o => o.value === card.value))
+            sel.value = card.value;
+        }
+        if (card.type === 'recording') {
+          // Restore participant text input
+          if (card.participant) {
+            const inp = document.getElementById(`rp-${card.id}`);
+            if (inp && !inp.value) inp.value = card.participant;
+          }
+          // Restore condition dropdowns
+          if (card.conditions) {
+            card.conditions.forEach(cond => {
+              if (!cond.value) return;
+              const sel = document.getElementById(`rc-${card.id}-${cond.key}`);
+              if (sel && Array.from(sel.options).some(o => o.value === cond.value))
+                sel.value = cond.value;
+            });
+          }
+        }
+      });
     }
 
     function renderNormal(rawList) {
       const list = applyOrder(rawList);
       const c = document.getElementById('card-container');
       c.innerHTML = '';
+      orcCardIds = [];
 
       list.forEach(card => {
         const row = document.createElement('div');
@@ -1469,12 +2155,37 @@ public class HTTPDash : MonoBehaviour
                  <span>${card.min.toFixed(dec)}</span><span>${card.max.toFixed(dec)}</span>
                </div>
                <button class=""btn btn-primary"" id=""sub-sl-${card.id}"">${card.buttonText}</button>${save}`;
+
+        } else if (card.type === 'orchestrator') {
+          orcCardIds.push(card.id);
+          orcCardUrls[card.id] = { prod: card.prodUrl, dev: card.devUrl };
+          h = `${HANDLE}
+               <div class=""row-title"">${card.title}</div>
+               <div class=""orc-row"">
+                 <input id=""orc-key-${card.id}"" type=""password"" placeholder=""Api-Key"" autocomplete=""off"" value=""${orcGetKey()}"">
+                 <label class=""orc-dev-label"">
+                   <input type=""checkbox"" id=""orc-dev-${card.id}""> Dev
+                 </label>
+               </div>
+               <select id=""orc-sel-${card.id}"" style=""margin-top:0.35rem"">
+                 <option value="""">— fetch sessions first —</option>
+               </select>
+               <div class=""orc-status"" id=""orc-status-${card.id}""></div>
+               <div class=""orc-connect-row"">
+                 <span class=""orc-dot"" id=""orc-dot-${card.id}"" title=""Connection status""></span>
+                 <button class=""btn btn-ghost"" id=""orc-connect-${card.id}"">Connect</button>
+                 <button class=""btn btn-ghost"" id=""orc-fetch-${card.id}"">&#8635; Fetch</button>
+               </div>
+               <div class=""orc-btn-row"">
+                 <button class=""btn btn-primary"" id=""orc-apply-${card.id}"">Apply Session</button>
+                 <button class=""btn btn-ghost"" id=""orc-clear-${card.id}"">Clear</button>
+               </div>`;
         }
 
         row.innerHTML = h;
         c.appendChild(row);
 
-        // Wire interactions
+        // ── Wire interactions ────────────────────────────────────────────────
         if (card.type === 'button') {
           document.getElementById(`btn-${card.id}`).onclick = () =>
             fetch(`/action/${card.id}`, { method: 'POST', body: card.title });
@@ -1527,10 +2238,265 @@ public class HTTPDash : MonoBehaviour
               fetch(`/action/${card.id}`, { method: 'POST', body: 'save:' + s.toString() });
             };
           }
+
+        } else if (card.type === 'orchestrator') {
+          // Save API key to cookie whenever it changes
+          const keyEl = document.getElementById(`orc-key-${card.id}`);
+          keyEl.addEventListener('change', () => orcSaveKey(keyEl.value));
+
+          document.getElementById(`orc-connect-${card.id}`).onclick = () =>
+            orcConnect(card.id);
+          document.getElementById(`orc-fetch-${card.id}`).onclick = () => orcFetch(card.id);
+
+          document.getElementById(`orc-apply-${card.id}`).onclick = () => {
+            const sessionId = document.getElementById(`orc-sel-${card.id}`).value;
+            const dev       = document.getElementById(`orc-dev-${card.id}`).checked;
+            const key       = keyEl.value.trim();
+            if (!sessionId) { setOrcStatus('error', 'Select a session first.'); return; }
+            orcSaveKey(key);
+
+            // Notify Unity so it can load the scene / set up game state
+            orcPost(card.id, {
+              action:        'apply',
+              apiKey:        key,
+              useDevServer:  dev,
+              sessionId:     sessionId
+            });
+
+            // Independently fetch the schedule in-browser to populate the timeline
+            const urls = orcCardUrls[card.id] || {};
+            const base = (dev ? urls.dev : urls.prod) || (dev
+              ? 'http://127.0.0.1:8000/api/v1'
+              : 'https://fittsteleopstudy.org/api/v1');
+            const scheduleUrl = base + `/sessions/${sessionId}/schedule`;
+
+            setOrcStatus('loading', 'Loading schedule…');
+            fetch(scheduleUrl, { headers: { 'Authorization': 'Api-Key ' + key } })
+              .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+              .then(scheduleData => {
+                console.log('[OrchestratorCard] Schedule raw:', scheduleData);
+                const sessionMeta = orcFetchedSessions[sessionId] || { session_id: sessionId };
+                renderTimeline(parseScheduleFromApi(scheduleData, sessionMeta));
+                setOrcStatus('ok', 'Session applied — schedule loaded.');
+              })
+              .catch(err => {
+                console.error('[OrchestratorCard] Schedule fetch error:', err);
+                // Unity may still publish the schedule via orchestrator-schedule channel
+                setOrcStatus('ok', 'Applied — waiting for schedule from Unity.');
+              });
+          };
+          document.getElementById(`orc-clear-${card.id}`).onclick = () => {
+            orcPost(card.id, { action: 'clear', apiKey: keyEl.value });
+          };
         }
       });
     }
 
+    // ── Orchestrator status + sessions channels ───────────────────────────────
+    function setOrcStatus(status, message) {
+      orcCardIds.forEach(id => {
+        const el = document.getElementById('orc-status-' + id);
+        if (!el) return;
+        el.textContent = message;
+        el.className = 'orc-status ' + (status || '');
+      });
+    }
+    function setOrcConnectDot(cardId, state) {
+      // state: '' (idle) | 'connecting' | 'connected' | 'failed'
+      const dot = document.getElementById('orc-dot-' + cardId);
+      if (dot) dot.className = 'orc-dot' + (state ? ' ' + state : '');
+    }
+    function setAllOrcConnectDots(state) {
+      orcCardIds.forEach(id => setOrcConnectDot(id, state));
+    }
+    function setOrcSessions(sessions) {
+      orcCardIds.forEach(id => {
+        const sel = document.getElementById('orc-sel-' + id);
+        if (!sel) return;
+        const prev = sel.value;
+        sel.innerHTML = '<option value="""">— select session —</option>';
+        sessions.forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s.id; opt.textContent = s.label;
+          sel.appendChild(opt);
+        });
+        if (prev && sel.querySelector(`option[value=""${prev}""]`)) sel.value = prev;
+      });
+    }
+
+    // ── Orchestrator applied: pre-fill Scene Setup, Camera, Recording fields ──
+    function applyOrchestratorData(data) {
+      if (!data || !Object.keys(data).length) return;
+
+      // Find the Scene Setup multifield card and pre-fill it.
+      // It was registered with field keys ""environment"" and ""interface"".
+      if (data.environmentScene) {
+        const envEls = document.querySelectorAll('[id^=""mf-""][id$=""-environment""]');
+        envEls.forEach(el => { el.value = data.environmentScene; });
+      }
+      if (data.interfacePrefab !== undefined) {
+        const ifEls = document.querySelectorAll('[id^=""mf-""][id$=""-interface""]');
+        ifEls.forEach(el => { el.value = data.interfacePrefab || ''; });
+      }
+      // Camera Selection dropdown (DropdownCard)
+      if (data.camera) {
+        document.querySelectorAll('[id^=""sel-""]').forEach(el => {
+          // The camera dropdown's options are Front/Back/Side; match by checking options
+          const hasCamera = Array.from(el.options).some(o =>
+            ['Front', 'Back', 'Side'].includes(o.value));
+          if (hasCamera) el.value = data.camera;
+        });
+      }
+      // Recording card participant
+      if (data.participant) {
+        document.querySelectorAll('[id^=""rp-""]').forEach(el => { el.value = data.participant; });
+      }
+      // Recording card interface condition
+      if (data.recInterface) {
+        document.querySelectorAll('[id^=""rc-""][id$=""-interface""]').forEach(el => {
+          if (el.querySelector(`option[value=""${data.recInterface}""]`))
+            el.value = data.recInterface;
+        });
+      }
+      // Mapping file (embodied runs only; field ID ends in '-mapping').
+      // 'mappingFile' is an empty string for simulated runs so we skip setting
+      // it in that case (leave whatever the researcher last chose in place).
+      if (data.mappingFile) {
+        document.querySelectorAll('[id^=""mf-""][id$=""-mapping""]').forEach(el => {
+          el.value = data.mappingFile;
+        });
+      }
+      // Save everything to form-state cookie so it survives a restart
+      saveFormState();
+    }
+
+    // ── Timeline ──────────────────────────────────────────────────────────────
+    let tlCollapsed = true;
+
+    document.getElementById('tl-collapse-btn').addEventListener('click', () => {
+      tlCollapsed = !tlCollapsed;
+      const panel = document.getElementById('timeline-panel');
+      panel.classList.toggle('collapsed', tlCollapsed);
+      document.getElementById('tl-collapse-btn').textContent = tlCollapsed ? '▲' : '▼';
+    });
+
+    function renderTimeline(data) {
+      const panel   = document.getElementById('timeline-panel');
+      const label   = document.getElementById('tl-session-label');
+      const empty   = document.getElementById('timeline-empty');
+      const scroll  = document.getElementById('timeline-scroll');
+
+      if (!data || !data.blocks || !data.blocks.length) {
+        label.innerHTML = 'No session loaded';
+        empty.style.display = '';
+        scroll.style.display = 'none';
+        return;
+      }
+
+      label.innerHTML = `<strong>${escHtml(data.participantId || '')}</strong>` +
+                        (data.studyName ? ` &mdash; ${escHtml(data.studyName)}` : '') +
+                        (data.sessionId ? ` <span style=""opacity:0.55"">(${escHtml(data.sessionId)})</span>` : '');
+      empty.style.display = 'none';
+      scroll.style.display = '';
+      scroll.innerHTML = '';
+
+      data.blocks.forEach(block => {
+        const col = document.createElement('div');
+        col.className = 'tl-block';
+
+        const head = document.createElement('div');
+        head.className = 'tl-block-head';
+        head.textContent = `B${block.ordinal}: ${block.interfaceCode || ''}`;
+        col.appendChild(head);
+
+        (block.conditions || []).forEach(cond => {
+          const row = document.createElement('div');
+          row.className = 'tl-condition' + (cond.conditionId === activeConditionId ? ' active' : '');
+          row.dataset.cid = cond.conditionId;
+          row.title = `${cond.interfaceLabel} · ${cond.viewpointLabel}\nClick to set camera = ${cond.viewpointLabel}`;
+
+          const vp = document.createElement('span');
+          vp.className = 'tl-vp';
+          vp.textContent = (cond.viewpointLabel || cond.viewpoint || '?').slice(0, 5);
+          row.appendChild(vp);
+
+          const geomsEl = document.createElement('div');
+          geomsEl.className = 'tl-geoms';
+          (cond.geometries || []).forEach((g, gi) => {
+            if (gi > 0) {
+              const arrow = document.createElement('span');
+              arrow.className = 'tl-arrow'; arrow.textContent = '→';
+              geomsEl.appendChild(arrow);
+            }
+            const chip = document.createElement('span');
+            chip.className = 'tl-geom';
+            chip.textContent = 'S' + g.sheetNumber;
+            chip.title = g.label || g.code;
+            geomsEl.appendChild(chip);
+          });
+          row.appendChild(geomsEl);
+
+          // Find the orchestrator card id for posting
+          row.addEventListener('click', () => {
+            if (!orcCardIds.length) return;
+            activeConditionId = cond.conditionId;
+            document.querySelectorAll('.tl-condition').forEach(el =>
+              el.classList.toggle('active', el.dataset.cid === cond.conditionId));
+            applyConditionLocally(cond.conditionId);
+            const _d   = orcConditionData[cond.conditionId] || {};
+            const _cfg = _d.config || {};
+            const _lbl = _d.labels || {};
+            orcPost(orcCardIds[0], {
+              action:             'apply_condition',
+              apiKey:             orcGetKey(),
+              conditionId:        cond.conditionId,
+              interfaceCondition: _cfg.interface_condition || '',
+              viewpoint:          _cfg.viewpoint || _lbl.viewpoint || '',
+              viewpointPosition:  _cfg.viewpoint_position  || 1,
+              environmentType:    (_d.session || _d.sessionMeta || {}).environment_type || '',
+              geometries:         (_lbl.geometry_sequence || []).map(g => ({
+                sheetNumber: g.sheet_number || 0,
+                label:       g.sheet_label || g.label || '',
+                code:        g.code  || ''
+              }))
+            });
+          });
+
+          col.appendChild(row);
+        });
+
+        scroll.appendChild(col);
+      });
+
+      // Auto-expand timeline when schedule loads
+      if (tlCollapsed) {
+        tlCollapsed = false;
+        panel.classList.remove('collapsed');
+        document.getElementById('tl-collapse-btn').textContent = '▼';
+      }
+    }
+
+    function handleConditionApplied(data) {
+      if (!data || !data.conditionId) return;
+      activeConditionId = data.conditionId;
+      document.querySelectorAll('.tl-condition').forEach(el =>
+        el.classList.toggle('active', el.dataset.cid === data.conditionId));
+      // Optionally update Camera dropdown to reflect the applied viewpoint
+      if (data.camera) {
+        document.querySelectorAll('[id^=""sel-""]').forEach(el => {
+          const hasCamera = Array.from(el.options).some(o => ['Front', 'Back', 'Side'].includes(o.value));
+          if (hasCamera && el.querySelector(`option[value=""${data.camera}""]`))
+            el.value = data.camera;
+        });
+        saveFormState();
+      }
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
+    }
+
+    // ── Recording card ────────────────────────────────────────────────────────
     function renderRecording(list) {
       const c = document.getElementById('recording-container');
       c.innerHTML = '';
@@ -1593,10 +2559,7 @@ public class HTTPDash : MonoBehaviour
       const el = document.getElementById(`rt-${cardId}`);
       if (!el) return;
       el.innerHTML = '';
-      if (!recordingTopics.length) {
-        el.innerHTML = '<div class=""t-empty"">No topics — click Refresh</div>';
-        return;
-      }
+      if (!recordingTopics.length) { el.innerHTML = '<div class=""t-empty"">No topics — click Refresh</div>'; return; }
       recordingTopics.forEach(t => {
         const row = document.createElement('label');
         row.className = 't-row';
@@ -1609,7 +2572,6 @@ public class HTTPDash : MonoBehaviour
         el.appendChild(row);
       });
     }
-
     function fetchTopicsNow() {
       fetch('/data/recording-topics?since=-1')
         .then(r => r.json())
@@ -1619,7 +2581,6 @@ public class HTTPDash : MonoBehaviour
         })
         .catch(err => console.error('topic refresh:', err));
     }
-
     function saveSel(id) {
       const p = document.getElementById(`rp-${id}`).value;
       const conds = {};
@@ -1655,7 +2616,7 @@ public class HTTPDash : MonoBehaviour
         body: JSON.stringify({ command, participant, conditions, topics }) });
     }
 
-    // ── Long-poll loops ───────────────────────────────────────────────────
+    // ── Long-poll loops ───────────────────────────────────────────────────────
     function cardsLoop(since) {
       fetch(`/data/cards?since=${since}`)
         .then(r => r.json())
@@ -1683,8 +2644,7 @@ public class HTTPDash : MonoBehaviour
       div.className = 'notif-item';
       div.style.background = color || '#444';
       div.innerHTML = `<h3>${title}</h3><p>${body}</p>`;
-      list.appendChild(div);
-      list.scrollTop = list.scrollHeight;
+      list.appendChild(div); list.scrollTop = list.scrollHeight;
     }
     function notifLoop() {
       fetch('/wait-for-message')
@@ -1693,19 +2653,51 @@ public class HTTPDash : MonoBehaviour
         .catch(err => { console.error('notif poll:', err); setTimeout(notifLoop, 2000); });
     }
 
-    // ── Startup ───────────────────────────────────────────────────────────
+    // Single merged orchestrator channel loop — replaces 5+ individual loops.
+    // The server merges all orchestrator-* sub-channels into one composite payload,
+    // keeping the browser under Chrome's 6-connection-per-origin limit so POST
+    // requests can always get through.
+    function orcDataLoop(since) {
+      fetch(`/data/orchestrator?since=${since}`)
+        .then(r => r.json())
+        .then(resp => {
+          const d = resp.data || {};
+          if (d.status)    setOrcStatus(d.status.status, d.status.message || '');
+          if (d.sessions)  setOrcSessions(d.sessions.sessions || []);
+          if (d.applied)   applyOrchestratorData(d.applied);
+          if (d.schedule)  renderTimeline(d.schedule);
+          if (d.condition) handleConditionApplied(d.condition);
+          if (d.ping) {
+            if (d.ping.connecting) {
+              setAllOrcConnectDots('connecting');
+            } else {
+              const state = d.ping.connected ? 'connected' : 'failed';
+              setAllOrcConnectDots(state);
+              if (!d.ping.connected && d.ping.error)
+                setOrcStatus('error', 'Connect failed: ' + d.ping.error);
+              else if (d.ping.connected)
+                setOrcStatus('ok', 'Connected — API reachable.');
+            }
+          }
+          orcDataLoop(resp.version);
+        })
+        .catch(() => setTimeout(() => orcDataLoop(since), 2000));
+    }
+
+    // ── Startup ───────────────────────────────────────────────────────────────
     loadGrid();
     buildColPicker();
     applyGrid();
     initCtrlReorder(document.getElementById('card-container'));
 
-    cardsLoop(0);
-    topicsLoop(0);
-    notifLoop();
+    cardsLoop(0);        // 1 connection
+    topicsLoop(0);       // 2 connections
+    notifLoop();         // 3 connections  (/wait-for-message)
+    orcDataLoop(0);      // 4 connections  (all orchestrator-* merged)
   </script>
 </body>
 </html>
 ";
-    }
+}
 
 }

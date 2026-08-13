@@ -2942,6 +2942,88 @@ Transform:
   m_CorrespondingSourceObject: {fileID: 1603250685544381334, guid: 590970b37962c1918b247a9780b5a108, type: 3}
   m_PrefabInstance: {fileID: 209902765}
   m_PrefabAsset: {fileID: 0}
+--- !u!1001 &212909843
+PrefabInstance:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Modification:
+    serializedVersion: 3
+    m_TransformParent: {fileID: 832356809}
+    m_Modifications:
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalScale.x
+      value: 0.001
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalScale.y
+      value: 0.001
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalScale.z
+      value: 0.001
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: -0
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalPosition.y
+      value: -0.074
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalPosition.z
+      value: -0.0035
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalRotation.w
+      value: 0.5
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalRotation.x
+      value: -0.5
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalRotation.y
+      value: -0.5
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalRotation.z
+      value: -0.5
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalEulerAnglesHint.x
+      value: -90
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalEulerAnglesHint.y
+      value: -90
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_LocalEulerAnglesHint.z
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_ConstrainProportionsScale
+      value: 1
+      objectReference: {fileID: 0}
+    - target: {fileID: -7635826562936255635, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_Materials.Array.data[0]
+      value: 
+      objectReference: {fileID: 2100000, guid: ee7ff2fed5da6ac6da5729ec22941a98, type: 2}
+    - target: {fileID: 919132149155446097, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+      propertyPath: m_Name
+      value: pointer_offset_long
+      objectReference: {fileID: 0}
+    m_RemovedComponents: []
+    m_RemovedGameObjects: []
+    m_AddedGameObjects: []
+    m_AddedComponents: []
+  m_SourcePrefab: {fileID: 100100000, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+--- !u!4 &212909844 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: -8679921383154817045, guid: 5cc4a3c7fc9bf1a4ebd0313ce953ee0c, type: 3}
+  m_PrefabInstance: {fileID: 212909843}
+  m_PrefabAsset: {fileID: 0}
 --- !u!1 &212958032
 GameObject:
   m_ObjectHideFlags: 0
@@ -9639,12 +9721,12 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 520442599}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.5, y: 0.5, z: 0.5, w: 0.5}
-  m_LocalPosition: {x: -40.4, y: 0, z: -46.3}
-  m_LocalScale: {x: 1000, y: 1000, z: 1000}
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: 0, y: -0.1401, z: -0.043900013}
+  m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 1002312965}
+  m_Father: {fileID: 832356809}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1001 &521357462
 PrefabInstance:
@@ -11532,6 +11614,8 @@ MonoBehaviour:
   rosTopicTaskComplete: /fitts/task_complete
   managedBySceneManager: 1
   contextMessage: Complete the Fitts' Law circular task.
+  isTrainingSheet: 1
+  finishTrainingButtonLabel: Finish Training
   showTargetGizmos: 1
   debugTrajectories: 1
   trajectorySampleInterval: 0.02
@@ -14946,6 +15030,12 @@ PrefabInstance:
     m_AddedGameObjects:
     - targetCorrespondingSourceObject: {fileID: 7882187937472503280, guid: 803cdd2482110ad4694e84729edc96f1, type: 3}
       insertIndex: -1
+      addedObject: {fileID: 212909844}
+    - targetCorrespondingSourceObject: {fileID: 7882187937472503280, guid: 803cdd2482110ad4694e84729edc96f1, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 520442600}
+    - targetCorrespondingSourceObject: {fileID: 7882187937472503280, guid: 803cdd2482110ad4694e84729edc96f1, type: 3}
+      insertIndex: -1
       addedObject: {fileID: 1002312965}
     - targetCorrespondingSourceObject: {fileID: 7882187937472503280, guid: 803cdd2482110ad4694e84729edc96f1, type: 3}
       insertIndex: -1
@@ -15511,6 +15601,8 @@ MonoBehaviour:
   rosTopicTaskComplete: /fitts/task_complete
   managedBySceneManager: 1
   contextMessage: Complete the Fitts' Law circular task.
+  isTrainingSheet: 0
+  finishTrainingButtonLabel: Finish Training
   showTargetGizmos: 1
   debugTrajectories: 1
   trajectorySampleInterval: 0.02
@@ -18037,12 +18129,13 @@ PrefabInstance:
       propertyPath: m_Name
       value: Unnamed-pointer_offset_full_tri
       objectReference: {fileID: 0}
+    - target: {fileID: 919132149155446097, guid: 1dc9843acbfd6df4485ed090b68fbf81, type: 3}
+      propertyPath: m_IsActive
+      value: 0
+      objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
-    m_AddedGameObjects:
-    - targetCorrespondingSourceObject: {fileID: -8679921383154817045, guid: 1dc9843acbfd6df4485ed090b68fbf81, type: 3}
-      insertIndex: 0
-      addedObject: {fileID: 520442600}
+    m_AddedGameObjects: []
     m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 1dc9843acbfd6df4485ed090b68fbf81, type: 3}
 --- !u!4 &1002312965 stripped
@@ -21791,6 +21884,8 @@ MonoBehaviour:
   rosTopicTaskComplete: /fitts/task_complete
   managedBySceneManager: 1
   contextMessage: Complete the Fitts' Law circular task.
+  isTrainingSheet: 0
+  finishTrainingButtonLabel: Finish Training
   showTargetGizmos: 1
   debugTrajectories: 1
   trajectorySampleInterval: 0.02
@@ -23547,6 +23642,8 @@ MonoBehaviour:
   rosTopicTaskComplete: /fitts/task_complete
   managedBySceneManager: 1
   contextMessage: Complete the Fitts' Law circular task.
+  isTrainingSheet: 0
+  finishTrainingButtonLabel: Finish Training
   showTargetGizmos: 1
   debugTrajectories: 1
   trajectorySampleInterval: 0.02
@@ -29483,6 +29580,8 @@ MonoBehaviour:
   rosTopicTaskComplete: /fitts/task_complete
   managedBySceneManager: 1
   contextMessage: Complete the Fitts' Law circular task.
+  isTrainingSheet: 0
+  finishTrainingButtonLabel: Finish Training
   showTargetGizmos: 1
   debugTrajectories: 1
   trajectorySampleInterval: 0.02
