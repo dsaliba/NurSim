@@ -102,16 +102,12 @@ public class VirtualKortexDriver : MonoBehaviour
 
         if (!string.IsNullOrEmpty(startupPresetName))
         {
-            if (presets.ContainsKey(startupPresetName))
-            {
-                LoadPreset(startupPresetName);
-            }
-            else
-            {
-                Debug.LogWarning(
-                    $"[VirtualKortexDriver] Startup preset '{startupPresetName}' not found in {PresetFilePath}."
-                );
-            }
+            // Defer to a coroutine so ArticulationBody components complete
+            // their first physics initialisation before we drive them.
+            // Calling SetJointAnglesWithCallback directly in Start() (before
+            // any FixedUpdate) races with the physics engine's own reset and
+            // can land the arm at the wrong pose.
+            StartCoroutine(ApplyStartupPresetDelayed());
         }
     }
 
@@ -176,6 +172,34 @@ public class VirtualKortexDriver : MonoBehaviour
         RegisterPresetDropdown();
 
         Debug.Log($"[VirtualKortexDriver] Saved preset '{presetName}' ({currentAngles.Length} joints).");
+    }
+
+    /// <summary>
+    ///     Defers startup preset application until ArticulationBody components
+    ///     have completed their first physics initialisation pass. Calling
+    ///     SetJointAnglesWithCallback during Start() (before any FixedUpdate)
+    ///     races with the physics engine's own reset and can land the arm at
+    ///     the wrong pose. Two fixed-update yields are enough to clear that
+    ///     window reliably.
+    /// </summary>
+    private IEnumerator ApplyStartupPresetDelayed()
+    {
+        // Let the physics engine complete at least two FixedUpdate cycles so
+        // ArticulationBody drive targets are no longer overwritten by the
+        // engine's initialisation reset.
+        yield return new WaitForFixedUpdate();
+        yield return new WaitForFixedUpdate();
+
+        if (presets.ContainsKey(startupPresetName))
+        {
+            LoadPreset(startupPresetName);
+        }
+        else
+        {
+            Debug.LogWarning(
+                $"[VirtualKortexDriver] Startup preset '{startupPresetName}' not found in {PresetFilePath}."
+            );
+        }
     }
 
     /// <summary>
@@ -319,11 +343,11 @@ public class VirtualKortexDriver : MonoBehaviour
 
         for (int i = 0; i < targetAngles.Length; i++)
         {
-            float errorRad = Mathf.Abs(Mathf.DeltaAngle(
+            float errorDeg = Mathf.Abs(Mathf.DeltaAngle(
                 currentAngles[i] * Mathf.Rad2Deg,
                 targetAngles[i] * Mathf.Rad2Deg
             ));
-            if (errorRad > settleThresholdDeg)
+            if (errorDeg > settleThresholdDeg)
             {
                 return false;
             }

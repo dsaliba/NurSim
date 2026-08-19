@@ -27,6 +27,11 @@ public class MoveAncestorToMatchTarget : MonoBehaviour
     [Tooltip("THIS object (the attached object) will end up at this transform's position after the move.")]
     private Transform targetTransform;
 
+    [Header("Calibration Options")]
+    [SerializeField]
+    [Tooltip("When enabled, calibration only corrects position — objectToMove's rotation is left unchanged.")]
+    private bool disregardRotation = false;
+
     [Header("Dashboard")]
     [SerializeField]
     [Tooltip("Text shown on the HTTPDash button that manually triggers calibration (the same move).")]
@@ -60,57 +65,77 @@ public class MoveAncestorToMatchTarget : MonoBehaviour
     }
 
     private void MoveToMatchTarget()
-{
-    if (objectToMove == null)
     {
-        Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': objectToMove is not assigned.");
-        return;
+        if (objectToMove == null)
+        {
+            Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': objectToMove is not assigned.");
+            return;
+        }
+
+        if (targetTransform == null)
+        {
+            Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': targetTransform is not assigned.");
+            return;
+        }
+
+        // TrackedPoseDriver writes the XR device's pose into this transform's LOCAL
+        // position and rotation every frame.  We must NOT touch this transform —
+        // instead we solve for the objectToMove world transform that makes the
+        // tracker's resulting WORLD pose equal to targetTransform's world pose.
+
+        // Current XR device output (TPD-driven local pose relative to objectToMove).
+        Vector3    localPos = transform.localPosition;
+        Quaternion localRot = transform.localRotation;
+
+        Quaternion newWorldRot;
+        Vector3    newWorldPos;
+
+        if (disregardRotation)
+        {
+            // Keep objectToMove's current rotation; only solve for position.
+            // objectToMove.position + objectToMove.rotation * localPos == targetTransform.position
+            newWorldRot = objectToMove.rotation;
+            newWorldPos = targetTransform.position - newWorldRot * localPos;
+            objectToMove.SetPositionAndRotation(newWorldPos, newWorldRot);
+        }
+        else
+        {
+            // Solve for objectToMove.rotation:
+            //   objectToMove.rotation * localRot == targetTransform.rotation
+            newWorldRot = targetTransform.rotation * Quaternion.Inverse(localRot);
+
+            // Solve for objectToMove.position:
+            //   objectToMove.position + objectToMove.rotation * localPos == targetTransform.position
+            newWorldPos = targetTransform.position - newWorldRot * localPos;
+
+            objectToMove.SetPositionAndRotation(newWorldPos, newWorldRot);
+        }
+
+        // Sanity checks (this transform, not objectToMove, should now match target).
+        float posErr = (transform.position - targetTransform.position).magnitude;
+        float rotErr = Quaternion.Angle(transform.rotation, targetTransform.rotation);
+
+        // When rotation is disregarded, only the position error is meaningful.
+        bool posOk = posErr <= 0.001f;
+        bool rotOk = disregardRotation || rotErr <= 0.1f;
+
+        if (!posOk || !rotOk)
+        {
+            Debug.LogWarning(
+                $"{nameof(MoveAncestorToMatchTarget)} on '{name}': post-calibration error — " +
+                $"pos {posErr * 100f:F1} cm" +
+                (disregardRotation ? " (rotation disregarded)." : $", rot {rotErr:F2}°.") +
+                " Check objectToMove has no non-uniform scale.");
+        }
+        else if (HTTPDash.Instance != null)
+        {
+            string rotNote = disregardRotation ? "rot skipped" : $"rot err {rotErr:F2}°";
+            HTTPDash.Instance.SendNotification(
+                "Calibration",
+                $"'{name}' calibrated to '{targetTransform.name}'. pos err {posErr * 1000f:F1} mm, {rotNote}.",
+                "#2e7d32");
+        }
     }
-
-    if (targetTransform == null)
-    {
-        Debug.LogWarning($"{nameof(MoveAncestorToMatchTarget)} on '{name}': targetTransform is not assigned.");
-        return;
-    }
-
-    // TrackedPoseDriver writes the XR device's pose into this transform's LOCAL
-    // position and rotation every frame.  We must NOT touch this transform —
-    // instead we solve for the objectToMove world transform that makes the
-    // tracker's resulting WORLD pose equal to targetTransform's world pose.
-
-    // Current XR device output (TPD-driven local pose relative to objectToMove).
-    Vector3    localPos = transform.localPosition;
-    Quaternion localRot = transform.localRotation;
-
-    // Solve for objectToMove.rotation:
-    //   objectToMove.rotation * localRot == targetTransform.rotation
-    Quaternion newWorldRot = targetTransform.rotation * Quaternion.Inverse(localRot);
-
-    // Solve for objectToMove.position:
-    //   objectToMove.position + objectToMove.rotation * localPos == targetTransform.position
-    Vector3 newWorldPos = targetTransform.position - newWorldRot * localPos;
-
-    objectToMove.SetPositionAndRotation(newWorldPos, newWorldRot);
-
-    // Sanity checks (this transform, not objectToMove, should now match target).
-    float posErr = (transform.position - targetTransform.position).magnitude;
-    float rotErr = Quaternion.Angle(transform.rotation, targetTransform.rotation);
-
-    if (posErr > 0.001f || rotErr > 0.1f)
-    {
-        Debug.LogWarning(
-            $"{nameof(MoveAncestorToMatchTarget)} on '{name}': post-calibration error — " +
-            $"pos {posErr * 100f:F1} cm, rot {rotErr:F2}°. " +
-            $"Check objectToMove has no non-uniform scale.");
-    }
-    else if (HTTPDash.Instance != null)
-    {
-        HTTPDash.Instance.SendNotification(
-            "Calibration",
-            $"'{name}' calibrated to '{targetTransform.name}'. pos err {posErr * 1000f:F1} mm, rot err {rotErr:F2}°.",
-            "#2e7d32");
-    }
-}
 
     private void OnDestroy()
     {

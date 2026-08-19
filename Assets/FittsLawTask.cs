@@ -63,6 +63,12 @@ using UnityEditor;
 ///                                 [settle_time - duration, settle_time].
 ///     /fitts/task_complete/*   — Int32 / Float32, final run summary,
 ///                                 published exactly once at the end.
+///     /fitts/training_log      — std_msgs/String (training mode only).
+///                                 Published on every target hit as:
+///                                 "[fromLabel] --> [toLabel] X.Xs"
+///                                 where X.X is elapsed seconds since the
+///                                 previous hit. fromLabel is -1 for the
+///                                 very first hit (no predecessor).
 ///   See fitts_ros_data_format.md for the full topic/field reference and
 ///   guidance on reconstructing per-trial tables from recorded bags.
 ///
@@ -71,6 +77,19 @@ using UnityEditor;
 ///     - Call Activate() (matching TrialGoal API) to enable it and begin the task.
 ///     - onComplete fires when all targets are hit; the GameObject is then disabled again.
 ///     - Wire this into SequentialGoalTrial exactly like any other TrialGoal.
+///
+/// • Training Sheet mode (isTrainingSheet = true):
+///     - ALL targets are simultaneously active: any target can be dwelt upon
+///       at any time.
+///     - Haptics and audio play on every hit exactly as in normal mode.
+///     - Each hit publishes a std_msgs/String to /fitts/training_log (or the
+///       configured rosTopicTrainingLog) in the format:
+///         "[fromLabel] --> [toLabel] X.Xs"
+///       where fromLabel is the label of the previously hit target (-1 for
+///       the very first hit) and X.X is the elapsed time in seconds.
+///     - The pointer must leave a target before it can register again.
+///     - Task does NOT auto-complete. Call CompleteTraining() (or use the
+///       dashboard "Finish Training" button) to end the session.
 ///
 /// Dependencies:
 ///   • Unity ROS-TCP-Connector package          (assumed always present — no compile guard)
@@ -146,7 +165,7 @@ public class FittsLawTask : Goal
     // ─────────────────────────────────────────────────────────────────────────
 
     [Header("Active-Target Dot Indicator")]
-    [Tooltip("Show a small sphere floating above the currently active target.")]
+    [Tooltip("Show a small sphere floating above the currently active target. Hidden automatically in training mode (all targets are active).")]
     public bool showDotIndicator = true;
 
     public Color dotColour = new Color(1f, 0.95f, 0.15f, 1f);
@@ -213,12 +232,18 @@ public class FittsLawTask : Goal
     // ─────────────────────────────────────────────────────────────────────────
 
     [Header("Training Sheet")]
-    [Tooltip("When enabled the task loops indefinitely instead of completing when all targets are visited. " +
-             "A 'Finish Training' button is added to the HTTP dashboard to manually complete the goal.")]
+    [Tooltip("When enabled: ALL targets are active simultaneously. Any target can be dwelt upon at any time. " +
+             "Haptics and audio play on every hit. Each hit publishes '[from] --> [to] X.Xs' to rosTopicTrainingLog. " +
+             "Task does NOT auto-complete — use the Finish Training button or call CompleteTraining().")]
     public bool isTrainingSheet = false;
 
     [Tooltip("Label shown on the Finish Training button in the HTTP dashboard.")]
     public string finishTrainingButtonLabel = "Finish Training";
+
+    [Tooltip("ROS topic for training-mode hit log messages.\n" +
+             "Publishes std_msgs/String in the format '[fromLabel] --> [toLabel] X.Xs'.\n" +
+             "fromLabel is -1 for the very first hit (no predecessor yet).")]
+    public string rosTopicTrainingLog = "/fitts/training_log";
 
     /// <summary>
     /// Fired when the entire Fitts' Law sequence is completed.
@@ -265,7 +290,7 @@ public class FittsLawTask : Goal
     [SerializeField] private float _fittsID            = 0f;  // Shannon ID for this layout
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Internal state
+    //  Internal state  —  shared
     // ─────────────────────────────────────────────────────────────────────────
 
     // World-space target centres
@@ -324,6 +349,22 @@ public class FittsLawTask : Goal
     private List<Vector2> _currentTrajPlane = new List<Vector2>();
     private List<float>   _currentTrajTimes = new List<float>();
     private float         _lastSampleTime;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Internal state  —  training mode only
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Per-slot dwell accumulators (training mode only; length == numTargets).
+    private float[] _trainingDwellAccums;
+
+    // Slot index of the last successfully hit target in training mode (-1 = none yet).
+    // The pointer must exit this slot before it can register a hit there again.
+    private int  _trainingLastHitSlot       = -1;
+    private bool _trainingLastHitSlotExited = true;
+
+    // For building the "[from] --> [to] X.Xs" log string.
+    private int   _trainingLastHitLabel = -1;   // label of most-recently hit target (-1 = first hit)
+    private float _trainingLastHitTime  = -1f;  // Time.time of most-recently hit target
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Unity lifecycle
@@ -396,12 +437,44 @@ public class FittsLawTask : Goal
             _currentTrajTimes.Add(Time.time - _movementStartTime);
 
             // Publish live pointer position so bagpipe records a trajectory CSV.
-            // Published from the moment the task becomes active (T1 dwell onwards)
-            // so the full path of every movement is captured.
             ROSPublishPointerPosition(p3, p2);
         }
 
-        // ── Dwell detection ──────────────────────────────────────────────────
+        // ── Dwell detection — branched by mode ───────────────────────────────
+        if (isTrainingSheet)
+            UpdateTrainingDwell();
+        else
+            UpdateNormalDwell();
+
+        UpdateDotIndicator();
+    }
+
+    private void OnDestroy()
+    {
+        StopHaptics();
+        DisposeHapticAction();
+        DestroyCachedTextures();
+        DestroyGeneratedTexture();
+        if (_dotIndicator != null)
+            DestroyImmediate(_dotIndicator);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Goal override
+    // ─────────────────────────────────────────────────────────────────────────
+
+    public new bool CheckIfObjectReachedGoal(GameObject obj) => _taskComplete;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Dwell detection  —  normal mode  (behaviour unchanged from original)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Normal (non-training) dwell: only the current visit-order target is active.
+    /// Extracted verbatim from the original Update() body — no behavioural change.
+    /// </summary>
+    private void UpdateNormalDwell()
+    {
         int     activeSlot     = _visitOrder[_visitStep];
         Vector3 targetPos      = _targetPositions3D[activeSlot];
         float   targetRadius3D = TargetRadius3D();
@@ -425,28 +498,118 @@ public class FittsLawTask : Goal
             _dwellAccum    = 0f;
             _dwellProgress = 0f;
         }
-
-        UpdateDotIndicator();
     }
 
-    private void OnDestroy()
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Dwell detection  —  training mode
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Training dwell: every slot is active simultaneously. Each slot has its own
+    /// dwell accumulator. A slot cannot register again until the pointer has
+    /// physically left it after the previous hit.
+    /// </summary>
+    private void UpdateTrainingDwell()
     {
-        StopHaptics();
-        DisposeHapticAction();
-        DestroyCachedTextures();
-        DestroyGeneratedTexture();
-        if (_dotIndicator != null)
-            DestroyImmediate(_dotIndicator);
+        if (_trainingDwellAccums == null || _trainingDwellAccums.Length != numTargets)
+            _trainingDwellAccums = new float[numTargets];
+
+        float   targetRadius3D = TargetRadius3D();
+        Vector3 pointerLocal   = transform.InverseTransformPoint(pointer.position);
+
+        // ── Track exit from the last-hit slot ───────────────────────────────
+        if (_trainingLastHitSlot >= 0 && !_trainingLastHitSlotExited)
+        {
+            Vector3 lastLocal = transform.InverseTransformPoint(_targetPositions3D[_trainingLastHitSlot]);
+            float   lastDist  = Vector2.Distance(
+                new Vector2(pointerLocal.x, pointerLocal.z),
+                new Vector2(lastLocal.x,    lastLocal.z));
+            if (lastDist > targetRadius3D)
+                _trainingLastHitSlotExited = true;
+        }
+
+        // ── Per-slot dwell accumulation ──────────────────────────────────────
+        float maxDwellProgress = 0f;
+
+        for (int slot = 0; slot < numTargets; slot++)
+        {
+            // Block the last-hit slot until the pointer exits.
+            if (slot == _trainingLastHitSlot && !_trainingLastHitSlotExited)
+            {
+                _trainingDwellAccums[slot] = 0f;
+                continue;
+            }
+
+            Vector3 targetLocal = transform.InverseTransformPoint(_targetPositions3D[slot]);
+            float   dist        = Vector2.Distance(
+                new Vector2(pointerLocal.x, pointerLocal.z),
+                new Vector2(targetLocal.x,  targetLocal.z));
+
+            if (dist <= targetRadius3D)
+            {
+                _trainingDwellAccums[slot] += Time.deltaTime;
+
+                float progress = _trainingDwellAccums[slot] / dwellTime;
+                if (progress > maxDwellProgress) maxDwellProgress = progress;
+
+                if (_trainingDwellAccums[slot] >= dwellTime)
+                {
+                    _trainingDwellAccums[slot] = 0f;
+                    RegisterTrainingHit(slot);
+                    break; // at most one hit per frame
+                }
+            }
+            else
+            {
+                _trainingDwellAccums[slot] = 0f;
+            }
+        }
+
+        _dwellProgress = Mathf.Clamp01(maxDwellProgress);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Goal override
+    //  Training hit registration
     // ─────────────────────────────────────────────────────────────────────────
 
-    public new bool CheckIfObjectReachedGoal(GameObject obj) => _taskComplete;
+    /// <summary>
+    /// Called whenever the pointer dwells long enough on any slot in training mode.
+    /// Triggers haptics/sound and publishes the "[from] --> [to] X.Xs" ROS log.
+    /// </summary>
+    private void RegisterTrainingHit(int hitSlot)
+    {
+        int   hitLabel = _slotLabel[hitSlot];
+        float now      = Time.time;
+
+        // ── Feedback ─────────────────────────────────────────────────────────
+        TriggerHaptics();
+        PlayHitSound();
+
+        // ── Build and publish the log string ─────────────────────────────────
+        string logMsg;
+        if (_trainingLastHitLabel < 0)
+        {
+            // First hit — no predecessor yet
+            logMsg = $"[-1] --> [{hitLabel}] (first hit)";
+        }
+        else
+        {
+            float elapsed = now - _trainingLastHitTime;
+            logMsg = $"[{_trainingLastHitLabel}] --> [{hitLabel}] {elapsed:F1}s";
+        }
+
+        ROSPublishTrainingLog(logMsg);
+        Debug.Log($"[FittsLawTask Training] {logMsg}");
+
+        // ── Update tracking state ─────────────────────────────────────────────
+        _trainingLastHitSlot       = hitSlot;
+        _trainingLastHitSlotExited = false; // pointer must leave before re-hit
+        _trainingLastHitLabel      = hitLabel;
+        _trainingLastHitTime       = now;
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Task logic
+    //  Task logic  (normal mode — unchanged)
     // ─────────────────────────────────────────────────────────────────────────
 
     private void ResetTask()
@@ -461,6 +624,17 @@ public class FittsLawTask : Goal
         _dwellAccum         = 0f;
         _dwellProgress      = 0f;
         _records.Clear();
+
+        // ── Reset training-mode state ─────────────────────────────────────────
+        _trainingLastHitSlot       = -1;
+        _trainingLastHitSlotExited = true;
+        _trainingLastHitLabel      = -1;
+        _trainingLastHitTime       = -1f;
+        if (_trainingDwellAccums != null)
+            Array.Clear(_trainingDwellAccums, 0, _trainingDwellAccums.Length);
+        else
+            _trainingDwellAccums = new float[numTargets];
+
         StartNewMovement();
         ApplyTextureForStep(0);
     }
@@ -571,8 +745,9 @@ public class FittsLawTask : Goal
 
     /// <summary>
     /// Called instead of completing when isTrainingSheet is true and the full
-    /// sequence has been visited. Resets back to T1 so the researcher can keep
-    /// practicing without stopping the recording.
+    /// sequence has been visited (only reachable via the legacy normal-mode flow;
+    /// in training mode the parallel dwell system is used instead).
+    /// Resets back to T1 so the researcher can keep practicing.
     /// </summary>
     private void LoopTrainingSheet()
     {
@@ -585,6 +760,15 @@ public class FittsLawTask : Goal
         _records.Clear();
         _dwellAccum    = 0f;
         _dwellProgress = 0f;
+
+        // Also reset training-mode tracking so the log starts fresh.
+        _trainingLastHitSlot       = -1;
+        _trainingLastHitSlotExited = true;
+        _trainingLastHitLabel      = -1;
+        _trainingLastHitTime       = -1f;
+        if (_trainingDwellAccums != null)
+            Array.Clear(_trainingDwellAccums, 0, _trainingDwellAccums.Length);
+
         StartNewMovement();
         ApplyTextureForStep(0);
         UpdateDotIndicator();
@@ -763,9 +947,7 @@ public class FittsLawTask : Goal
         _ros.RegisterPublisher<PointMsg>(T(rosTopicMovement, "settle_position_plane"));
         _ros.RegisterPublisher<Int32Msg>(T(rosTopicMovement, "trajectory_samples"));
 
-        // Continuous pointer position stream — one message per trajectory sample.
-        // Slice by [settle_time - duration, settle_time] in post-processing to
-        // reconstruct per-movement paths.
+        // Continuous pointer position stream
         _ros.RegisterPublisher<PointMsg>(T(rosTopicPointer, "position_plane"));
         _ros.RegisterPublisher<PointMsg>(T(rosTopicPointer, "position_3d"));
 
@@ -777,6 +959,9 @@ public class FittsLawTask : Goal
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "mean_fitts_id"));
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "throughput_bps"));
         _ros.RegisterPublisher<Float32Msg>(T(rosTopicTaskComplete, "layout_fitts_id"));
+
+        // Training mode hit log  (std_msgs/String, always registered so rosbag captures it)
+        _ros.RegisterPublisher<StringMsg>(rosTopicTrainingLog);
     }
 
     private void ROSPublishPointerPosition(Vector3 pos3D, Vector2 posPlane)
@@ -905,6 +1090,17 @@ public class FittsLawTask : Goal
         _ros.Publish(T(rosTopicTaskComplete, "layout_fitts_id"), new Float32Msg { data = _fittsID });
 
         Debug.Log($"[FittsLawTask] Task complete published under {rosTopicTaskComplete}/*");
+    }
+
+    /// <summary>
+    /// Publishes a std_msgs/String to rosTopicTrainingLog.
+    /// Called by RegisterTrainingHit on every target hit in training mode.
+    /// Format: "[fromLabel] --> [toLabel] X.Xs"  (fromLabel = -1 for first hit)
+    /// </summary>
+    private void ROSPublishTrainingLog(string message)
+    {
+        if (_ros == null) return;
+        _ros.Publish(rosTopicTrainingLog, new StringMsg { data = message });
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1081,9 +1277,12 @@ public class FittsLawTask : Goal
     {
         if (_dotIndicator == null) return;
 
+        // In training mode every target is active simultaneously — no single
+        // target to highlight, so the dot is unconditionally hidden.
         bool visible = showDotIndicator &&
                        Application.isPlaying &&
                        !_taskComplete &&
+                       !isTrainingSheet &&          // ← hidden in training mode
                        _targetPositions3D != null &&
                        _visitOrder        != null &&
                        _visitStep < _visitOrder.Length;
@@ -1111,6 +1310,16 @@ public class FittsLawTask : Goal
     {
         if (numTargets < 3 || imageSizePx < 64 || _visitOrder == null) return;
 
+        // ── Training mode: single all-active texture ─────────────────────────
+        if (isTrainingSheet)
+        {
+            DestroyCachedTextures();
+            _cachedTextures = new Texture2D[] { BakeTrainingTexture() };
+            ApplyTextureForStep(0);
+            return;
+        }
+
+        // ── Normal mode: one texture per visit step ──────────────────────────
         int totalSteps = _visitOrder.Length + 1;
 
         if (_prebakedTextures != null && _prebakedTextures.Length == totalSteps
@@ -1196,6 +1405,41 @@ public class FittsLawTask : Goal
         mat.mainTextureOffset = new Vector2(0f, 0f);
     }
 
+    /// <summary>
+    /// Bakes a texture where all targets are drawn in texActiveColour.
+    /// Used exclusively by training mode so every target appears green/active.
+    /// </summary>
+    private Texture2D BakeTrainingTexture()
+    {
+        int size = imageSizePx;
+        var tex  = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        tex.name = "FittsLayout_training_all_active";
+
+        Color32[] pixels = new Color32[size * size];
+        Color32   bg     = texBackgroundColour;
+        for (int i = 0; i < pixels.Length; i++) pixels[i] = bg;
+
+        Vector2 centre = new Vector2(size * 0.5f, size * 0.5f);
+        float   tRad   = targetWidthPx * 0.5f;
+
+        if (drawGuideRing)
+            DrawCircleOutline(pixels, size, centre, radiusPx + 1.5f, radiusPx - 1.5f, texRingColour);
+
+        for (int slot = 0; slot < numTargets; slot++)
+        {
+            int     label  = (_slotLabel != null) ? _slotLabel[slot] : (slot + 1);
+            Vector2 imgPos = ImageSpacePosition(slot);
+            Vector2 pixPos = new Vector2(centre.x + imgPos.x, centre.y - imgPos.y);
+
+            DrawFilledCircle(pixels, size, pixPos, tRad, texActiveColour); // always active colour
+            DrawLabel(pixels, size, pixPos, label.ToString(), tRad);
+        }
+
+        tex.SetPixels32(pixels);
+        tex.Apply();
+        return tex;
+    }
+
     private Texture2D BakeTexture(int step)
     {
         int size  = imageSizePx;
@@ -1256,7 +1500,10 @@ public class FittsLawTask : Goal
         if (numTargets < 3 || imageSizePx < 64) return;
 
         if (_editorPreviewTexture != null) DestroyImmediate(_editorPreviewTexture);
-        _editorPreviewTexture = BakeTexture(0);
+
+        // Training mode: preview shows all targets as active so the designer can
+        // see what the sheet looks like at runtime.
+        _editorPreviewTexture = isTrainingSheet ? BakeTrainingTexture() : BakeTexture(0);
 
         var mr = GetComponent<MeshRenderer>();
         if (mr == null) return;
@@ -1496,12 +1743,14 @@ public class FittsLawTask : Goal
             for (int s = 0; s < _visitOrder.Length; s++)
                 if (_visitOrder[s] == slot) { visitStep = s; break; }
 
-            bool isActive = Application.isPlaying &&
-                            !_taskComplete &&
-                            _visitStep < _visitOrder.Length &&
-                            _visitOrder[_visitStep] == slot;
+            // In training mode all slots are simultaneously active.
+            bool isActive = Application.isPlaying && !_taskComplete && (
+                isTrainingSheet
+                    ? true
+                    : (_visitStep < _visitOrder.Length && _visitOrder[_visitStep] == slot));
 
-            bool isDone = Application.isPlaying && IsSlotDone(slot);
+            // In training mode no slot is ever marked "done".
+            bool isDone = Application.isPlaying && !isTrainingSheet && IsSlotDone(slot);
 
             Gizmos.color = isActive ? targetActiveColour :
                            isDone   ? targetDoneColour   :
@@ -1525,7 +1774,22 @@ public class FittsLawTask : Goal
             };
             Handles.Label(_targetPositions3D[slot] + Vector3.up * sphereRadius * 0.4f, gizLabel, style);
 
-            if (isActive && _dwellProgress > 0f)
+            // In training mode show per-slot dwell arcs for whichever slots have
+            // accumulated any dwell. In normal mode show the single active arc.
+            if (isTrainingSheet)
+            {
+                if (_trainingDwellAccums != null && slot < _trainingDwellAccums.Length)
+                {
+                    float tp = _trainingDwellAccums[slot] / dwellTime;
+                    if (tp > 0f)
+                    {
+                        Handles.color = new Color(0.1f, 1f, 0.3f, 0.9f);
+                        Handles.DrawWireArc(_targetPositions3D[slot], transform.up, transform.right,
+                                            tp * 360f, sphereRadius * 1.15f);
+                    }
+                }
+            }
+            else if (isActive && _dwellProgress > 0f)
             {
                 Handles.color = new Color(0.1f, 1f, 0.3f, 0.9f);
                 Handles.DrawWireArc(_targetPositions3D[slot], transform.up, transform.right,
@@ -1645,19 +1909,29 @@ public class FittsLawTaskEditor : UnityEditor.Editor
                         && task._prebakedTextures.Length > 0
                         && task._prebakedTextures[0] != null;
 
-        UnityEditor.EditorGUILayout.HelpBox(
-            hasPrebaked
-                ? $"{task._prebakedTextures.Length} pre-baked textures ready. Runtime uses these — no generation lag."
-                : "No pre-baked textures found. Textures will be generated at runtime (causes lag spike). Click Bake to fix this.",
-            hasPrebaked ? UnityEditor.MessageType.Info : UnityEditor.MessageType.Warning);
-
-        if (GUILayout.Button(hasPrebaked ? "Re-Bake Textures" : "Bake Textures", GUILayout.Height(32)))
-            task.BakeAndSaveTextures();
-
-        if (hasPrebaked && GUILayout.Button("Clear Pre-Baked Textures"))
+        if (task.isTrainingSheet)
         {
-            task._prebakedTextures = null;
-            UnityEditor.EditorUtility.SetDirty(task);
+            UnityEditor.EditorGUILayout.HelpBox(
+                "Training mode is enabled. A single all-active texture is generated at runtime — " +
+                "pre-baking is not applicable.",
+                UnityEditor.MessageType.Info);
+        }
+        else
+        {
+            UnityEditor.EditorGUILayout.HelpBox(
+                hasPrebaked
+                    ? $"{task._prebakedTextures.Length} pre-baked textures ready. Runtime uses these — no generation lag."
+                    : "No pre-baked textures found. Textures will be generated at runtime (causes lag spike). Click Bake to fix this.",
+                hasPrebaked ? UnityEditor.MessageType.Info : UnityEditor.MessageType.Warning);
+
+            if (GUILayout.Button(hasPrebaked ? "Re-Bake Textures" : "Bake Textures", GUILayout.Height(32)))
+                task.BakeAndSaveTextures();
+
+            if (hasPrebaked && GUILayout.Button("Clear Pre-Baked Textures"))
+            {
+                task._prebakedTextures = null;
+                UnityEditor.EditorUtility.SetDirty(task);
+            }
         }
     }
 }

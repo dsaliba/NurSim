@@ -284,7 +284,7 @@ MonoBehaviour:
   - name: None
     prefab: {fileID: 0}
   - name: Fitts
-    prefab: {fileID: 6287253735072360466, guid: 33036383184602240b0bbe0e5c621e45, type: 3}
+    prefab: {fileID: 7902695751072504455, guid: 73e430caa96561546983090a49c14326, type: 3}
   - name: VR
     prefab: {fileID: 7253451991368956462, guid: 5252a7539e8a0cc4885f50adb6e22dd8, type: 3}
   - name: Default
@@ -310,6 +310,8 @@ MonoBehaviour:
     serviceName: narrow_pose
   - displayName: Side
     serviceName: side_pose
+  - displayName: Bent
+    serviceName: narrow_bent_pose
   rightArmName: right_arm
   leftArmName: left_arm
   chestHeightMin: 0
@@ -392,8 +394,8 @@ MonoBehaviour:
   interfaceNameHumanHand: 
   interfaceNameGamepadRobot: Fitts
   interfaceNameMotionController: Fitts
-  mappingFileGamepadRobot: Joystick
-  mappingFileMotionController: Pose
+  mappingFileGamepadRobotPath: 
+  mappingFileMotionControllerPath: 
   recordingInterfaceHumanHand: hand
   recordingInterfaceGamepadRobot: joystick
   recordingInterfaceMotionController: pose
