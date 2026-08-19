@@ -114,13 +114,13 @@ public class OrchestratorClient : MonoBehaviour
 
     // ── PlayerPrefs persistence keys ─────────────────────────────────────────
 
-    private const string PrefKeyApiKey         = "IONA_OrchestratorApiKey";
-    private const string PrefKeyScheduleJson   = "IONA_ScheduleJson";
+    private const string PrefKeyApiKey          = "IONA_OrchestratorApiKey";
+    private const string PrefKeyScheduleJson    = "IONA_ScheduleJson";
     private const string PrefKeyActiveCondition = "IONA_ActiveConditionId";
 
     // ── Internal state ───────────────────────────────────────────────────────
 
-    private string              _apiKey;
+    private string               _apiKey;
     private OrchestratorSchedule _activeSchedule;
 
     // ── Unity lifecycle ──────────────────────────────────────────────────────
@@ -457,6 +457,13 @@ public class OrchestratorClient : MonoBehaviour
                 // breaking cross-block environment changes).
                 string targetScene = MapSceneName(envType, interfaceCondition);
 
+                // ── Interface prefab name ─────────────────────────────────────────────
+                // Mapped from the raw API interface_condition code to the name used in
+                // SimulationManager.interfaces[].name (e.g. "gamepad_robot" → "Fitts").
+                // Previously the raw code was passed directly, so SimulationManager could
+                // not match it and loaded no interface.
+                string targetIface = MapInterfacePrefabName(envType, interfaceCondition);
+
                 // ── RecordingManager ─────────────────────────────────────────────────
                 string recCamera = MapRecordingViewpoint(viewpoint);
                 string recIface  = MapRecordingInterface(interfaceCondition);
@@ -477,7 +484,7 @@ public class OrchestratorClient : MonoBehaviour
                 // ── SimulationManager ────────────────────────────────────────────────
                 var sim = SimulationManager.Instance;
                 if (sim != null)
-                    sim.ApplyCondition(interfaceCondition, viewpoint, viewpointPosition,
+                    sim.ApplyCondition(targetIface, viewpoint, viewpointPosition,
                                        sheetLabels, targetScene, mappingFilePath);
                 else
                     Debug.LogWarning("[OrchestratorClient] SimulationManager.Instance is null — " +
@@ -505,8 +512,9 @@ public class OrchestratorClient : MonoBehaviour
                 HTTPDash.Instance?.PublishChannel("orchestrator-condition", json);
 
                 Debug.Log($"[OrchestratorClient] Applied condition '{conditionId}': " +
-                          $"iface='{interfaceCondition}' viewpoint='{viewpoint}' " +
-                          $"pos={viewpointPosition} scene='{targetScene}' " +
+                          $"iface='{interfaceCondition}' → prefab='{targetIface}' " +
+                          $"viewpoint='{viewpoint}' pos={viewpointPosition} " +
+                          $"scene='{targetScene}' " +
                           $"sheets=[{string.Join(", ", sheetLabels ?? System.Array.Empty<string>())}]");
                 return;
             }
@@ -540,6 +548,11 @@ public class OrchestratorClient : MonoBehaviour
 
         string targetScene = MapSceneName(envType, interfaceCondition);
 
+        // Map raw API interface_condition code to the SimulationManager prefab name
+        // (e.g. "gamepad_robot" → "Fitts") so SimulationManager can match it against
+        // its interfaces[].name list and actually load the interface.
+        string targetIface = MapInterfacePrefabName(envType, interfaceCondition);
+
         // Recording manager
         string recCamera = MapRecordingViewpoint(viewpoint);
         string recIface  = MapRecordingInterface(interfaceCondition);
@@ -557,7 +570,7 @@ public class OrchestratorClient : MonoBehaviour
         // SimulationManager — triggers scene restart
         var sim = SimulationManager.Instance;
         if (sim != null)
-            sim.ApplyCondition(interfaceCondition, viewpoint, viewpointPosition,
+            sim.ApplyCondition(targetIface, viewpoint, viewpointPosition,
                                sheetLabels, targetScene, mappingFilePathDirect);
         else
             Debug.LogWarning("[OrchestratorClient] SimulationManager.Instance is null — " +
@@ -580,8 +593,9 @@ public class OrchestratorClient : MonoBehaviour
         HTTPDash.Instance?.PublishChannel("orchestrator-condition", json);
 
         Debug.Log($"[OrchestratorClient] ApplyConditionDirect '{action.conditionId}': " +
-                  $"iface='{interfaceCondition}' viewpoint='{viewpoint}' " +
-                  $"pos={viewpointPosition} env='{envType}' scene='{targetScene}' " +
+                  $"iface='{interfaceCondition}' → prefab='{targetIface}' " +
+                  $"viewpoint='{viewpoint}' pos={viewpointPosition} " +
+                  $"env='{envType}' scene='{targetScene}' " +
                   $"sheets=[{string.Join(", ", sheetLabels ?? System.Array.Empty<string>())}]");
     }
 
